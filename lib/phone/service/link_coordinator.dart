@@ -16,8 +16,8 @@ typedef Pairer = Future<PairedPc> Function(QrPayload qr, PhoneSession session, v
 /// (swiped from recents) and come back on boot with no UI at all.
 ///
 /// Owns the [PhoneStore] (paired PCs) and one reconnecting [PcLinkApi] per
-/// paired PC, all sharing one pure [PhoneSession] whose signer is a proxy
-/// to the UI isolate. Takes commands from the UI (`getState`, `pair`,
+/// paired PC, each driving its own pure [PhoneSession] whose signer is a
+/// proxy to the UI isolate. Takes commands from the UI (`getState`, `pair`,
 /// `revoke`, `refresh`) and publishes `state` snapshots back.
 final class LinkCoordinator {
   LinkCoordinator({
@@ -32,14 +32,18 @@ final class LinkCoordinator {
         _send = send,
         _linkFactory = linkFactory,
         _pairer = pairer,
-        _session = PhoneSession(signer: signer, clock: clock);
+        _clock = clock;
 
   final PhoneStore _store;
   final BiometricSigner _signer;
   final void Function(Map<String, Object?>) _send;
   final LinkFactory _linkFactory;
   final Pairer _pairer;
-  final PhoneSession _session;
+  final Clock _clock;
+
+  /// Each link and each pairing attempt gets its own [PhoneSession], so an
+  /// in-flight pairing can never be observed (or cancelled) by a link.
+  PhoneSession _newSession() => PhoneSession(signer: _signer, clock: _clock);
 
   final _links = <String, PcLinkApi>{};
   final _online = <String>{};
@@ -86,7 +90,7 @@ final class LinkCoordinator {
     try {
       if (rawQr is! String) throw const FormatException('QR manquant');
       final qr = QrPayload.parse(rawQr);
-      final pc = await _pairer(qr, _session, _onEffect);
+      final pc = await _pairer(qr, _newSession(), _onEffect);
       await _store.upsertPc(pc);
       _pcs = await _store.pcs();
       _needsRepair.remove(pc.pcId);
@@ -128,7 +132,7 @@ final class LinkCoordinator {
 
   Future<void> _startLink(PairedPc pc) async {
     await _stopLink(pc.pcId); // never two links for the same PC.
-    final link = _linkFactory(pc, _session, _onEffect);
+    final link = _linkFactory(pc, _newSession(), _onEffect);
     _links[pc.pcId] = link;
     unawaited(link.start());
   }
