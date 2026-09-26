@@ -33,6 +33,8 @@ Chaque appareil garde sa clé privée sur lui ; seules des signatures sont
 tool/build_release.ps1
 ```
 
+Utilisez `pwsh -File tool/build_release.ps1` si PowerShell 7 est installé, sinon `powershell -File tool/build_release.ps1`.
+
 Prérequis : Flutter, Android SDK, Inno Setup, et le Mode développeur Windows
 (Paramètres → Système → Espace développeurs) pour compiler la version
 Windows.

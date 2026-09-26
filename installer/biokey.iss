@@ -1,9 +1,12 @@
 #define AppName "BioKey"
 #define AppVersion GetEnv("BIOKEY_VERSION")
+#if AppVersion == ""
+  #error BIOKEY_VERSION non défini — lancez tool/build_release.ps1
+#endif
 #define AppExe "biokey.exe"
 
 [Setup]
-AppId={{9C0D2C7E-6B4F-4E0C-9C1B-BIOKEY000001}
+AppId={{4A3D03B0-8FE0-4B2A-8A9E-9898F5832791}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher=Opsidious
