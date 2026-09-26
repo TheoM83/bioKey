@@ -10,7 +10,7 @@ import '../../support/fake_signer.dart';
 
 void main() {
   const qr = QrPayload(pcId: 'pc1', name: 'PC', host: 'h', port: 1, fingerprint: 'fp', token: 'tok');
-  const pc = PairedPc(pcId: 'pc1', name: 'PC', host: 'h', port: 1, fingerprint: 'fp');
+  const pc = PairedPc(pcId: 'pc1', name: 'PC', host: 'h', port: 1, fingerprint: 'fp', session: 'sess1');
   late FakeSigner signer;
   late FakeClock clock;
   late PhoneSession s;
@@ -30,18 +30,46 @@ void main() {
     expect(m.pub, signer.keys.pubSpkiB64);
   });
 
-  test('pair_challenge → signed proof with pairing prompt; paired → PhonePairedWith', () async {
+  test('pair_challenge → signed proof with pairing prompt; paired → PhonePairedWith carrying the session', () async {
     await s.beginPairing(qr);
     final fx = await s.onFrame(pc, Codec.encode(const PairChallengeMsg(nonce: 'NONCE')));
     final proof = sentOf(fx) as PairProofMsg;
     expect(v.verify(pubSpkiB64: signer.keys.pubSpkiB64, payload: 'NONCE', sigB64: proof.sig), isTrue);
     expect(signer.prompts.single, 'Appairer avec PC ?');
-    final done = await s.onFrame(pc, Codec.encode(const PairedMsg(pcId: 'pc1', name: 'PC-MAISON')));
-    expect(done.whereType<PhonePairedWith>().single.pc.name, 'PC-MAISON');
+    final done = await s.onFrame(pc, Codec.encode(const PairedMsg(pcId: 'pc1', name: 'PC-MAISON', session: 'newsess')));
+    final paired = done.whereType<PhonePairedWith>().single.pc;
+    expect(paired.name, 'PC-MAISON');
+    expect(paired.session, 'newsess');
+  });
+
+  test('pair_challenge without a pairing in flight closes without prompting', () async {
+    final fx = await s.onFrame(pc, Codec.encode(const PairChallengeMsg(nonce: 'N')));
+    expect(fx.single, isA<PhoneClose>());
+    expect(signer.prompts, isEmpty);
+  });
+
+  test('paired with a pcId different from the pairing QR closes without pairing', () async {
+    await s.beginPairing(qr);
+    final fx = await s.onFrame(pc, Codec.encode(const PairedMsg(pcId: 'someone-else', name: 'x', session: 's')));
+    expect(fx.single, isA<PhoneClose>());
+    expect(fx.whereType<PhonePairedWith>(), isEmpty);
+  });
+
+  test('paired with no pairing in flight closes without pairing', () async {
+    final fx = await s.onFrame(pc, Codec.encode(const PairedMsg(pcId: 'pc1', name: 'x', session: 's')));
+    expect(fx.single, isA<PhoneClose>());
+    expect(fx.whereType<PhonePairedWith>(), isEmpty);
   });
 
   test('cancelled pairing closes', () async {
+    await s.beginPairing(qr);
     signer.cancelNext = true;
+    expect((await s.onFrame(pc, Codec.encode(const PairChallengeMsg(nonce: 'N')))).single, isA<PhoneClose>());
+  });
+
+  test('an unexpected signer error during pairing closes', () async {
+    await s.beginPairing(qr);
+    signer.throwNext = true;
     expect((await s.onFrame(pc, Codec.encode(const PairChallengeMsg(nonce: 'N')))).single, isA<PhoneClose>());
   });
 
@@ -62,11 +90,29 @@ void main() {
     expect((sentOf(await s.onFrame(pc, frame)) as AuthDeniedMsg).reason, DenyReason.biometricFailed);
   });
 
+  test('an unexpected signer error during auth denies as biometric_failed', () async {
+    final frame = Codec.encode(const AuthMsg(id: 'u1', pcId: 'pc1', action: 'open', label: 'x', nonce: 'N', iat: 1000, exp: 1030));
+    signer.throwNext = true;
+    final fx = await s.onFrame(pc, frame);
+    expect(fx.whereType<PhoneAuthShown>(), isNotEmpty);
+    expect((sentOf(fx) as AuthDeniedMsg).reason, DenyReason.biometricFailed);
+  });
+
   test('expired, oversized window or foreign pcId → denied timeout without prompting', () async {
     final expired = Codec.encode(const AuthMsg(id: 'u', pcId: 'pc1', action: 'open', label: 'x', nonce: 'N', iat: 900, exp: 990));
     final wide = Codec.encode(const AuthMsg(id: 'u', pcId: 'pc1', action: 'open', label: 'x', nonce: 'N', iat: 1000, exp: 1100));
     final foreign = Codec.encode(const AuthMsg(id: 'u', pcId: 'other', action: 'open', label: 'x', nonce: 'N', iat: 1000, exp: 1030));
     for (final f in [expired, wide, foreign]) {
+      expect((sentOf(await s.onFrame(pc, f)) as AuthDeniedMsg).reason, DenyReason.timeout);
+    }
+    expect(signer.prompts, isEmpty);
+  });
+
+  test('iat too far in the future, exp before iat, or non-open action → denied timeout without prompting', () async {
+    final futureIat = Codec.encode(const AuthMsg(id: 'u', pcId: 'pc1', action: 'open', label: 'x', nonce: 'N', iat: 1061, exp: 1090));
+    final backwards = Codec.encode(const AuthMsg(id: 'u', pcId: 'pc1', action: 'open', label: 'x', nonce: 'N', iat: 1030, exp: 1000));
+    final wrongAction = Codec.encode(const AuthMsg(id: 'u', pcId: 'pc1', action: 'close', label: 'x', nonce: 'N', iat: 1000, exp: 1030));
+    for (final f in [futureIat, backwards, wrongAction]) {
       expect((sentOf(await s.onFrame(pc, f)) as AuthDeniedMsg).reason, DenyReason.timeout);
     }
     expect(signer.prompts, isEmpty);
@@ -78,9 +124,10 @@ void main() {
     expect((await s.onFrame(pc, 'x')).single, isA<PhoneClose>());
   });
 
-  test('hello carries pub and pcId', () async {
+  test('hello carries pub, pcId and the stored session', () async {
     final m = sentOf(await s.hello(pc)) as HelloMsg;
     expect(m.pcId, 'pc1');
     expect(m.pub, signer.keys.pubSpkiB64);
+    expect(m.session, pc.session);
   });
 }

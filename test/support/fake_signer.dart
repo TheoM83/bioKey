@@ -4,7 +4,7 @@ import 'test_keys.dart';
 class FakeSigner implements BiometricSigner {
   final keys = TestKeys();
   final prompts = <String>[];
-  bool cancelNext = false, failNext = false;
+  bool cancelNext = false, failNext = false, throwNext = false;
 
   @override
   Future<String> ensurePublicKey() async => keys.pubSpkiB64;
@@ -19,6 +19,10 @@ class FakeSigner implements BiometricSigner {
     if (failNext) {
       failNext = false;
       throw BiometricFailed('lockout');
+    }
+    if (throwNext) {
+      throwNext = false;
+      throw StateError('boom');
     }
     return keys.sign(payload);
   }

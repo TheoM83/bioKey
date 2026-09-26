@@ -43,6 +43,7 @@ final class PhoneSession {
   QrPayload? _pairingQr;
 
   static const authTtl = 30;
+  static const clockSkewAllowance = 60;
 
   Future<List<PhoneEffect>> beginPairing(QrPayload qr) async {
     _pairingQr = qr;
@@ -52,7 +53,7 @@ final class PhoneSession {
 
   Future<List<PhoneEffect>> hello(PairedPc pc) async {
     final pub = await _signer.ensurePublicKey();
-    return [PhoneSend(Codec.encode(HelloMsg(pcId: pc.pcId, pub: pub)))];
+    return [PhoneSend(Codec.encode(HelloMsg(pcId: pc.pcId, pub: pub, session: pc.session)))];
   }
 
   Future<List<PhoneEffect>> onFrame(PairedPc pc, String frame) async {
@@ -66,7 +67,7 @@ final class PhoneSession {
       case PairChallengeMsg():
         return _onPairChallenge(pc, m);
       case PairedMsg():
-        return _onPaired(pc, m);
+        return _onPaired(m);
       case UnknownMsg():
         return [PhoneUnknownByPc(pc.pcId)];
       case AuthMsg():
@@ -81,33 +82,52 @@ final class PhoneSession {
   }
 
   Future<List<PhoneEffect>> _onPairChallenge(PairedPc pc, PairChallengeMsg m) async {
+    // No pairing session in flight: this connection has no business asking
+    // us to sign anything. Refuse without prompting the user.
+    if (_pairingQr == null) return const [PhoneClose()];
     try {
       final sig = await _signer.sign(payload: m.nonce, prompt: 'Appairer avec ${pc.name} ?');
       return [PhoneSend(Codec.encode(PairProofMsg(sig: sig)))];
     } on BiometricCancelled {
+      _pairingQr = null;
       return const [PhoneClose()];
     } on BiometricFailed {
+      _pairingQr = null;
+      return const [PhoneClose()];
+    } on Object {
+      _pairingQr = null;
       return const [PhoneClose()];
     }
   }
 
-  Future<List<PhoneEffect>> _onPaired(PairedPc pc, PairedMsg m) async {
+  Future<List<PhoneEffect>> _onPaired(PairedMsg m) async {
     final qr = _pairingQr;
+    if (qr == null || m.pcId != qr.pcId) {
+      _pairingQr = null;
+      return const [PhoneClose()];
+    }
     _pairingQr = null;
     return [
       PhonePairedWith(PairedPc(
         pcId: m.pcId,
         name: m.name,
-        host: qr?.host ?? pc.host,
-        port: qr?.port ?? pc.port,
-        fingerprint: qr?.fingerprint ?? pc.fingerprint,
+        host: qr.host,
+        port: qr.port,
+        fingerprint: qr.fingerprint,
+        session: m.session,
       )),
     ];
   }
 
   Future<List<PhoneEffect>> _onAuth(PairedPc pc, AuthMsg m, String frame) async {
     final now = _clock.nowSec();
-    if (m.pcId != pc.pcId || now > m.exp || m.exp - m.iat > authTtl) {
+    final fresh = m.pcId == pc.pcId &&
+        m.action == 'open' &&
+        m.exp >= m.iat &&
+        m.exp - m.iat <= authTtl &&
+        m.iat <= now + clockSkewAllowance &&
+        now <= m.exp;
+    if (!fresh) {
       return [PhoneSend(Codec.encode(AuthDeniedMsg(id: m.id, reason: DenyReason.timeout)))];
     }
     final shown = PhoneAuthShown(m.label, pc.name);
@@ -117,6 +137,8 @@ final class PhoneSession {
     } on BiometricCancelled {
       return [shown, PhoneSend(Codec.encode(AuthDeniedMsg(id: m.id, reason: DenyReason.user)))];
     } on BiometricFailed {
+      return [shown, PhoneSend(Codec.encode(AuthDeniedMsg(id: m.id, reason: DenyReason.biometricFailed)))];
+    } on Object {
       return [shown, PhoneSend(Codec.encode(AuthDeniedMsg(id: m.id, reason: DenyReason.biometricFailed)))];
     }
   }
