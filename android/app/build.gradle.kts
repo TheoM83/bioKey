@@ -7,12 +7,18 @@ plugins {
 
 android {
     namespace = "io.nestware.biokey"
-    compileSdk = 35
+    // mobile_scanner (and several other plugins, transitively via
+    // androidx.camera) require compileSdk 36; Gradle already resolved and
+    // installed Android SDK Platform 36 locally when this first failed.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
+        // flutter_local_notifications requires core library desugaring
+        // (its README's "Android Integration" section).
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -37,6 +43,10 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+}
+
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
 
 flutter {
