@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:biokey/core/protocol/codec.dart';
 import 'package:biokey/core/protocol/messages.dart';
@@ -25,6 +26,11 @@ final class FakePcLink implements PcLinkApi {
   @override
   bool online = false;
 
+  /// When set, `stop()` doesn't complete until this completes — lets a
+  /// test prove a caller genuinely awaited `stop()` rather than just
+  /// having called it.
+  Completer<void>? stopGate;
+
   void emit(PhoneEffect e) => _onEffect(e);
 
   @override
@@ -37,6 +43,8 @@ final class FakePcLink implements PcLinkApi {
   Future<void> stop() async {
     stopCalls++;
     started = false;
+    final gate = stopGate;
+    if (gate != null) await gate.future;
   }
 }
 
@@ -228,5 +236,59 @@ void main() {
     await Future<void>.delayed(Duration.zero);
 
     expect(authNotifier.shown, isEmpty);
+  });
+
+  test('shutdown() completes only after all links\' stop() futures complete', () async {
+    await store.upsertPc(makePc('a'));
+    await store.upsertPc(makePc('b'));
+    final ctrl = build();
+    await ctrl.init();
+
+    final gateA = Completer<void>();
+    final gateB = Completer<void>();
+    links['a']!.stopGate = gateA;
+    links['b']!.stopGate = gateB;
+
+    var shutdownCompleted = false;
+    final shutdownFuture = ctrl.shutdown().whenComplete(() => shutdownCompleted = true);
+
+    await Future<void>.delayed(Duration.zero);
+    expect(shutdownCompleted, isFalse, reason: 'still waiting on both links\' stop() to complete');
+
+    gateA.complete();
+    await Future<void>.delayed(Duration.zero);
+    expect(shutdownCompleted, isFalse, reason: 'still waiting on b\'s stop()');
+
+    gateB.complete();
+    await shutdownFuture;
+
+    expect(shutdownCompleted, isTrue);
+    expect(links['a']!.stopCalls, 1);
+    expect(links['b']!.stopCalls, 1);
+  });
+
+  test('shutdown() detaches the gate and cancels a pending auto-cancel notification wait', () async {
+    await store.upsertPc(makePc('a'));
+    final gate = FakeForegroundGate();
+    final authNotifier = FakeAuthNotifier();
+    final ctrl = build(gate: gate, authNotifier: authNotifier);
+    await ctrl.init();
+
+    final pc = ctrl.pcs.single;
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final frame = Codec.encode(AuthMsg(id: 'u1', pcId: 'a', action: 'open', label: 'Mon app', nonce: 'N', iat: now, exp: now + 20));
+    await sessions['a']!.onFrame(pc, frame);
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+    expect(authNotifier.shown, hasLength(1), reason: 'sanity: the notification was actually shown');
+    expect(authNotifier.cancelled, isEmpty);
+
+    // The app never resumes; shutdown() must still cancel the notification
+    // and stop waiting on it, instead of leaving that 35s wait running
+    // past disposal.
+    await ctrl.shutdown().timeout(const Duration(seconds: 1));
+
+    expect(authNotifier.cancelled, [authNotifier.shown.single.id]);
+    expect(gate.detached, isTrue);
   });
 }

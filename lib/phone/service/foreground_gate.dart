@@ -9,6 +9,7 @@ import 'package:flutter/widgets.dart';
 abstract interface class ForegroundGateApi {
   bool get isResumed;
   Future<void> whenResumed({Duration timeout});
+  void detach();
 }
 
 /// Tracks whether BioKey is in the foreground (`AppLifecycleState.resumed`)
@@ -34,6 +35,7 @@ class ForegroundGate with WidgetsBindingObserver implements ForegroundGateApi {
     _resumed = WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
   }
 
+  @override
   void detach() {
     WidgetsBinding.instance.removeObserver(this);
   }

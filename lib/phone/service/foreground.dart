@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -83,14 +84,34 @@ final class AuthNotifier implements AuthNotifierApi {
   static const _channelId = 'biokey_auth';
 
   final _plugin = FlutterLocalNotificationsPlugin();
-  bool _initialized = false;
 
-  /// Idempotent: safe to call before every [showAuthPrompt] without
-  /// re-registering the notification channel each time.
+  /// The in-flight (or completed) initialization, memoised so concurrent
+  /// callers share the same attempt instead of racing two
+  /// `initialize`/`createNotificationChannel` calls. Cleared on failure so
+  /// the *next* call retries from scratch rather than being stuck forever
+  /// returning an already-failed future.
+  Future<void>? _initFuture;
+
+  /// Idempotent and safe to call concurrently: safe to call before every
+  /// [showAuthPrompt] without re-registering the notification channel each
+  /// time, and a caller that starts init() while another init() is still
+  /// running gets that same in-flight attempt rather than starting a
+  /// second one.
   @override
-  Future<void> init() async {
-    if (_initialized) return;
-    _initialized = true;
+  Future<void> init() {
+    final existing = _initFuture;
+    if (existing != null) return existing;
+    final future = _doInit();
+    _initFuture = future;
+    unawaited(future.catchError((Object _) {
+      // Let the next init() call try again instead of every future call
+      // replaying this same failure forever.
+      _initFuture = null;
+    }));
+    return future;
+  }
+
+  Future<void> _doInit() async {
     const android = AndroidInitializationSettings('@mipmap/ic_launcher');
     await _plugin.initialize(settings: const InitializationSettings(android: android));
     await _plugin
@@ -107,6 +128,7 @@ final class AuthNotifier implements AuthNotifierApi {
 
   @override
   Future<void> showAuthPrompt({required int id, required String label, required String pcName}) async {
+    await init();
     await _plugin.show(
       id: id,
       title: 'BioKey',

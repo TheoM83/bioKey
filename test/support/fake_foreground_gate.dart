@@ -7,6 +7,7 @@ import 'package:biokey/phone/service/foreground_gate.dart';
 class FakeForegroundGate implements ForegroundGateApi {
   @override
   bool isResumed = false;
+  bool detached = false;
 
   final _changes = StreamController<bool>.broadcast();
 
@@ -24,5 +25,10 @@ class FakeForegroundGate implements ForegroundGateApi {
   Future<void> whenResumed({Duration timeout = const Duration(seconds: 25)}) {
     if (isResumed) return Future<void>.value();
     return _changes.stream.firstWhere((r) => r).timeout(timeout).then((_) {});
+  }
+
+  @override
+  void detach() {
+    detached = true;
   }
 }

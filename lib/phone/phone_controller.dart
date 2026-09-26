@@ -51,6 +51,16 @@ final class PhoneController extends ChangeNotifier {
   var _pcs = <PairedPc>[];
   var _disposed = false;
 
+  /// Completed by [shutdown] to interrupt any in-flight
+  /// "wait for resume, then cancel the notification" waits (see
+  /// [_showAndAutoCancel]) instead of leaving them running past disposal.
+  final _shutdownSignal = Completer<void>();
+
+  /// Every currently-in-flight [_showAndAutoCancel] call, keyed by
+  /// notification id, so [shutdown] can await all of them finishing
+  /// (which happens promptly once [_shutdownSignal] wakes them).
+  final _pendingAuthCancel = <int, Future<void>>{};
+
   List<PairedPc> get pcs => List.unmodifiable(_pcs);
   bool isOnline(String pcId) => _onlinePcIds.contains(pcId);
 
@@ -151,19 +161,22 @@ final class PhoneController extends ChangeNotifier {
   /// runs, not after (see [PhoneSession]'s `onAuthShown` callback).
   void _onAuthShownEarly(PhoneAuthShown e) {
     if (_gate.isResumed) return;
-    unawaited(_showAndAutoCancel(e));
+    final id = _authNotificationId(e.label, e.pcName);
+    final future = _showAndAutoCancel(id, e);
+    _pendingAuthCancel[id] = future;
+    unawaited(future.whenComplete(() => _pendingAuthCancel.remove(id)));
   }
 
-  Future<void> _showAndAutoCancel(PhoneAuthShown e) async {
-    final id = _authNotificationId(e.label, e.pcName);
+  Future<void> _showAndAutoCancel(int id, PhoneAuthShown e) async {
     await _authNotifier.init();
     await _authNotifier.showAuthPrompt(id: id, label: e.label, pcName: e.pcName);
-    try {
-      await _gate.whenResumed(timeout: const Duration(seconds: 35));
-    } on Object {
-      // Timed out without the app resuming — still cancel below; the auth
-      // request itself has its own (shorter) server-side TTL.
-    }
+    // Whichever comes first: the app resumes, the 35s bound expires (the
+    // auth request itself has its own, shorter, server-side TTL), or
+    // shutdown() is asked to tear everything down early.
+    await Future.any([
+      _gate.whenResumed(timeout: const Duration(seconds: 35)).catchError((_) {}),
+      _shutdownSignal.future,
+    ]);
     await _authNotifier.cancel(id);
   }
 
@@ -176,12 +189,32 @@ final class PhoneController extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
+  /// Stops and awaits every link, detaches the foreground gate, and
+  /// cancels any pending "wait for resume, then cancel the notification"
+  /// waits (and the notifications they'd otherwise leave shown) — the
+  /// fully-awaited teardown [dispose] itself cannot provide, since
+  /// `ChangeNotifier.dispose()` is synchronous.
+  ///
+  /// Callers should `await controller.shutdown()` before dropping the
+  /// controller rather than relying on [dispose] alone.
+  Future<void> shutdown() async {
+    if (!_shutdownSignal.isCompleted) _shutdownSignal.complete();
+    await Future.wait(_pendingAuthCancel.values.toList());
+    await Future.wait(_links.values.map((l) => l.stop()));
+    _links.clear();
+    _gate.detach();
+  }
+
+  /// `ChangeNotifier.dispose()` is synchronous, so it cannot itself await
+  /// [shutdown]'s link-stop/notification-cancel work — callers that need
+  /// a fully-awaited teardown should call `await controller.shutdown()`
+  /// before disposing. This is a best-effort fire-and-forget backstop for
+  /// callers that don't.
   @override
   void dispose() {
     if (_disposed) return;
     _disposed = true;
-    unawaited(Future.wait(_links.values.map((l) => l.stop())));
-    _links.clear();
+    unawaited(shutdown());
     super.dispose();
   }
 }
