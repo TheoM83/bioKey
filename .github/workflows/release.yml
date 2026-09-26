@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.35.6
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BioKey-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+  windows:
+    name: Build Windows installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable symlinks without Developer Mode
+        shell: pwsh
+        run: reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock /t REG_DWORD /f /v AllowDevelopmentWithoutDevLicense /d 1
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.35.6
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build windows --release
+      - name: Zip Windows build
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath "BioKey-windows-$tag.zip"
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $env:BIOKEY_VERSION = "${{ github.ref_name }}".TrimStart('v')
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\biokey.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BioKey-windows
+          path: |
+            BioKey-windows-*.zip
+            dist/BioKey-Setup-*.exe
+
+  release:
+    name: Create GitHub Release
+    needs: [apk, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: BioKey-apk
+          path: dist-apk
+      - uses: actions/download-artifact@v4
+        with:
+          name: BioKey-windows
+          path: dist-windows
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist-apk/app-release.apk
+            dist-windows/BioKey-windows-*.zip
+            dist-windows/dist/BioKey-Setup-*.exe

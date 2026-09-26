@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze-test:
+    name: Analyze & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.35.6
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze --fatal-infos
+      - run: flutter test --coverage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/lcov.info
+
+  apk:
+    name: Build Android APK
+    needs: analyze-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.35.6
+          channel: stable
+          cache: true
+      - run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BioKey-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+  windows:
+    name: Build Windows
+    needs: analyze-test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable symlinks without Developer Mode
+        shell: pwsh
+        run: reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock /t REG_DWORD /f /v AllowDevelopmentWithoutDevLicense /d 1
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.35.6
+          channel: stable
+          cache: true
+      - run: flutter build windows --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BioKey-windows
+          path: build/windows/x64/runner/Release
