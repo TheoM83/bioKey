@@ -2746,3 +2746,102 @@ git commit -m "docs: J1 on-device validation results
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
+
+---
+
+### Task 15: One-click install — Windows setup.exe, release APK, 3-step README
+
+**Files:**
+- Create: `installer/biokey.iss` (Inno Setup script)
+- Create: `tool/build_release.ps1`
+- Create: `README.md`
+- Modify: `.gitignore` (add `dist/`)
+
+**Interfaces:**
+- Consumes: `build/windows/x64/runner/Release/` (Task 11), `build/app/outputs/flutter-apk/app-release.apk` (Task 13).
+- Produces: `dist/BioKey-Setup-<version>.exe`, `dist/BioKey-<version>.apk`.
+
+- [ ] **Step 1: Install Inno Setup if missing**
+
+```powershell
+if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and -not (Test-Path "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") -and -not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { winget install --id JRSoftware.InnoSetup -e --accept-source-agreements --accept-package-agreements --scope user }
+```
+
+- [ ] **Step 2: Write `installer/biokey.iss`**
+
+```ini
+#define AppName "BioKey"
+#define AppVersion GetEnv("BIOKEY_VERSION")
+#define AppExe "biokey.exe"
+
+[Setup]
+AppId={{9C0D2C7E-6B4F-4E0C-9C1B-BIOKEY000001}
+AppName={#AppName}
+AppVersion={#AppVersion}
+AppPublisher=Opsidious
+DefaultDirName={localappdata}\Programs\{#AppName}
+DefaultGroupName={#AppName}
+PrivilegesRequired=lowest
+OutputDir=..\dist
+OutputBaseFilename=BioKey-Setup-{#AppVersion}
+Compression=lzma2
+SolidCompression=yes
+WizardStyle=modern
+DisableProgramGroupPage=yes
+UninstallDisplayIcon={app}\{#AppExe}
+CloseApplications=yes
+
+[Languages]
+Name: "french"; MessagesFile: "compiler:Languages\French.isl"
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Files]
+Source: "..\build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+
+[Icons]
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"
+
+[Run]
+Filename: "{app}\{#AppExe}"; Description: "Lancer BioKey"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+Filename: "taskkill"; Parameters: "/IM {#AppExe} /F"; Flags: runhidden; RunOnceId: "killbiokey"
+```
+
+`PrivilegesRequired=lowest` + `{localappdata}\Programs` ⇒ no admin prompt. Task 11's `launch_at_startup` registers the run-at-login entry on first launch, so the installer does not touch the registry.
+
+- [ ] **Step 3: Write `tool/build_release.ps1`**
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$root = Split-Path $PSScriptRoot -Parent
+Set-Location $root
+$version = (Select-String -Path pubspec.yaml -Pattern '^version:\s*([0-9.]+)').Matches[0].Groups[1].Value
+$env:BIOKEY_VERSION = $version
+New-Item -ItemType Directory -Force dist | Out-Null
+flutter build windows --release
+$iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+& $iscc installer\biokey.iss
+flutter build apk --release
+Copy-Item build\app\outputs\flutter-apk\app-release.apk "dist\BioKey-$version.apk" -Force
+Get-ChildItem dist
+```
+
+- [ ] **Step 4: Write `README.md` (French, install in 3 steps)**
+
+Sections: *Ce que fait BioKey* (3 lines), *Installer* (1. Sur le PC : lancer `BioKey-Setup-x.y.z.exe`, suivant, terminé — BioKey apparaît dans la barre système. 2. Sur le téléphone : ouvrir `BioKey-x.y.z.apk`, autoriser l'installation, ouvrir BioKey, accepter les notifications et l'exclusion batterie. 3. Appairer : icône BioKey → Téléphone → Afficher le QR → scanner depuis le téléphone → poser le doigt.), *Protéger une application* (icône → Apps → Ajouter → « Créer le raccourci »), *Sécurité en une phrase*, *Construire soi-même* (`tool/build_release.ps1`, prérequis : Flutter, Android SDK, Inno Setup, Mode développeur Windows pour compiler).
+
+- [ ] **Step 5: Run the release build**
+
+Run: `powershell -File tool/build_release.ps1`
+Expected: `dist/BioKey-Setup-<version>.exe` and `dist/BioKey-<version>.apk` exist. Run the setup on this machine: installs without an admin prompt, BioKey launches, tray icon appears, uninstall entry present in Settings → Apps.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add installer tool README.md .gitignore
+git commit -m "build: one-click Windows installer, release APK script, install README
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
