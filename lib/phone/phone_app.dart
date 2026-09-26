@@ -51,7 +51,7 @@ Future<void> runPhone() async {
   runApp(PhoneApp(controller: controller, kv: kv, serviceError: serviceError));
 }
 
-final class PhoneApp extends StatelessWidget {
+final class PhoneApp extends StatefulWidget {
   const PhoneApp({super.key, required this.controller, required this.kv, this.serviceError});
 
   final PhoneController controller;
@@ -59,12 +59,51 @@ final class PhoneApp extends StatelessWidget {
   final String? serviceError;
 
   @override
+  State<PhoneApp> createState() => _PhoneAppState();
+}
+
+/// Observes app lifecycle at the root so [PhoneController.shutdown] runs
+/// when the app is torn down — the plan requires every link stopped and
+/// every pending auth notification cancelled before disposal, which
+/// [PhoneController.dispose] alone can't guarantee since
+/// `ChangeNotifier.dispose()` is synchronous (see its own doc comment).
+class _PhoneAppState extends State<PhoneApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.detached) return;
+    // `didChangeAppLifecycleState` is synchronous, so shutdown() can't be
+    // awaited here — it's fired and left to run best-effort. This hook is
+    // itself best-effort on Android: the OS usually kills the process
+    // outright (without ever delivering `detached`, let alone giving this
+    // callback time to run) rather than giving the app a chance to react,
+    // so this mainly helps on lifecycles that do deliver it cleanly
+    // (iOS, desktop-hosted runs, an app-initiated exit).
+    unawaited(widget.controller.shutdown());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    // Best-effort backstop for a disposal that didn't go through a
+    // `detached` lifecycle event: dispose() itself fires shutdown()
+    // un-awaited (see its doc comment).
+    widget.controller.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'BioKey',
       theme: ThemeData(colorSchemeSeed: const Color(0xFFD71921), useMaterial3: true),
       darkTheme: ThemeData(colorSchemeSeed: const Color(0xFFD71921), brightness: Brightness.dark, useMaterial3: true),
-      home: _PhoneHome(controller: controller, kv: kv, serviceError: serviceError),
+      home: _PhoneHome(controller: widget.controller, kv: widget.kv, serviceError: widget.serviceError),
     );
   }
 }
