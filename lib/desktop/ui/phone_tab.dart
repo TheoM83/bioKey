@@ -35,6 +35,13 @@ final class PhoneTab extends StatelessWidget {
                       'Scannez avec BioKey sur votre téléphone (valide 2 min)',
                       textAlign: TextAlign.center,
                     ),
+                    const SizedBox(height: 12),
+                    // Always offered: a QR that expired, or whose token was
+                    // consumed by a pairing attempt that failed, is dead.
+                    OutlinedButton(
+                      onPressed: controller.startPairing,
+                      child: const Text('Nouveau QR'),
+                    ),
                   ],
                 ],
               ),
@@ -50,6 +57,19 @@ final class PhoneTab extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text('${phone.name} · ${controller.phoneOnline ? 'connecté' : 'hors ligne'}'),
+                  if (controller.phoneNeedsRepair) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      'Appairage invalide — scannez à nouveau le QR',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Theme.of(context).colorScheme.error),
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton(
+                      onPressed: controller.repairPhone,
+                      child: const Text('Nouveau QR'),
+                    ),
+                  ],
                   const SizedBox(height: 16),
                   FilledButton.tonal(
                     onPressed: controller.revokePhone,
