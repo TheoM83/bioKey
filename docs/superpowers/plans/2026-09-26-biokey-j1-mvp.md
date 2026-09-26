@@ -2737,6 +2737,12 @@ Tick each line in the checklist file with measured values:
 - Toggle phone Wi-Fi off/on → reconnects.
 - Reboot PC → BioKey starts in the tray, phone reconnects.
 - Firewall: `netstat -ano | findstr biokey` shows only LISTEN on 47621/47622 and LAN peers.
+- Swipe the app away from recents then request → prompt still arrives (links live in the foreground service).
+- Reboot the phone (don't open BioKey) then request → service restarted on boot, app launched / full-screen alert, prompt arrives.
+- Phone idle > 6 h then request → still connected (connectedDevice service, no dataSync 6 h cap).
+- Request from the lock screen → screen turns on, BioKey shows over the lock screen with the prompt.
+- Pair on a PC with WSL/Hyper-V installed → the QR carries the Wi-Fi/Ethernet address (not a vEthernet one); pairing succeeds.
+- Phone leaves the Wi-Fi abruptly (airplane mode) → PC tray shows « Téléphone hors ligne » within ~30 s (15 s WebSocket ping).
 
 - [ ] **Step 4: Commit the filled checklist**
 
