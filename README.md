@@ -1,16 +1,38 @@
-# biokey
+# BioKey
 
-A new Flutter project.
+## Ce que fait BioKey
 
-## Getting Started
+BioKey transforme le téléphone en clé biométrique pour le PC. Le téléphone
+signe des demandes d'authentification avec l'empreinte digitale ou Face ID.
+Le PC vérifie la signature et déverrouille ou lance les applications
+protégées.
 
-This project is a starting point for a Flutter application.
+## Installer
 
-A few resources to get you started if this is your first Flutter project:
+1. **Sur le PC** : lancer `BioKey-Setup-x.y.z.exe`, suivant, terminé — BioKey
+   apparaît dans la barre système.
+2. **Sur le téléphone** : ouvrir `BioKey-x.y.z.apk` depuis le gestionnaire de
+   fichiers du téléphone (autoriser « Sources inconnues » /
+   « Installer des applications inconnues » si demandé), ouvrir BioKey,
+   accepter les notifications et l'exclusion de batterie.
+3. **Appairer** : icône BioKey → Téléphone → Afficher le QR → scanner depuis
+   le téléphone → poser le doigt.
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+## Protéger une application
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+Icône BioKey → Apps → Ajouter → « Créer le raccourci ».
+
+## Sécurité en une phrase
+
+Chaque appareil garde sa clé privée sur lui ; seules des signatures sont
+échangées, jamais de secret.
+
+## Construire soi-même
+
+```powershell
+tool/build_release.ps1
+```
+
+Prérequis : Flutter, Android SDK, Inno Setup, et le Mode développeur Windows
+(Paramètres → Système → Espace développeurs) pour compiler la version
+Windows.

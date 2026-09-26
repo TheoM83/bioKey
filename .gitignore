@@ -1,6 +1,9 @@
 # Project tooling (not part of the Flutter app)
 .superpowers/
 
+# Release build outputs
+dist/
+
 # Miscellaneous
 *.class
 *.log
