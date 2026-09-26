@@ -33,6 +33,11 @@ Source: "..\build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: ignore
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"
 
+[Registry]
+; Same value launch_at_startup writes at first run (appName "BioKey"), so
+; the uninstaller removes it.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "BioKey"; ValueData: """{app}\{#AppExe}"" --hidden"; Flags: uninsdeletevalue
+
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Lancer BioKey"; Flags: nowait postinstall skipifsilent
 

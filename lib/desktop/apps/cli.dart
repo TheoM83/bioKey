@@ -11,4 +11,12 @@ final class ShowWindow extends CliCommand {
   const ShowWindow();
 }
 
-CliCommand parseCli(List<String> args) => (args.length >= 2 && args[0] == 'open') ? OpenApp(args[1]) : const ShowWindow();
+/// Flag the autostart entry launches BioKey with: start in the tray only.
+const hiddenFlag = '--hidden';
+
+/// Parses the command line; [hiddenFlag] is a startup option, not a
+/// command, and is ignored here.
+CliCommand parseCli(List<String> args) {
+  final a = args.where((x) => x != hiddenFlag).toList();
+  return (a.length >= 2 && a[0] == 'open') ? OpenApp(a[1]) : const ShowWindow();
+}

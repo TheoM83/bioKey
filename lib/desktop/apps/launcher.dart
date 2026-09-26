@@ -23,7 +23,9 @@ final class WindowsLauncher implements AppLauncher {
       return;
     }
     if (!File(t).existsSync() && !Directory(t).existsSync()) throw LaunchFailed('Introuvable : $t');
-    await Process.start('cmd', ['/c', 'start', '', t], runInShell: false, mode: ProcessStartMode.detached);
+    // ShellExecute via url_launcher: no cmd.exe in between, so characters
+    // such as & ^ % in the path are never interpreted by a shell.
+    if (!await launchUrl(Uri.file(t, windows: true))) throw LaunchFailed('Impossible d’ouvrir $t');
   }
 }
 
