@@ -1,53 +1,53 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart' show ServiceRequestFailure;
 
 import '../core/pairing/qr_payload.dart';
-import '../core/session/clock.dart';
 import '../core/storage/phone_store.dart';
 import '../core/storage/secure_kv.dart';
 import '../platform/flutter_secure_kv.dart';
-import 'net/mdns_finder.dart';
-import 'net/pc_link.dart';
 import 'phone_controller.dart';
 import 'service/foreground.dart';
 import 'service/foreground_gate.dart';
 import 'signer/biometric_signature_signer.dart';
 import 'ui/battery_guide.dart';
 import 'ui/computers_screen.dart';
+import 'ui/full_screen_guide.dart';
 import 'ui/scan_screen.dart';
 
-/// Entry point for the phone role: wires secure storage, the biometric
-/// signer, the reconnecting-link controller and the Android foreground
-/// service together, then runs the UI.
+/// Entry point for the phone role (UI isolate).
+///
+/// The links to paired PCs run in the foreground service's isolate
+/// (`startCallback` → `LinkCoordinator`), so they survive this Activity
+/// being destroyed and restart on boot. This isolate owns the biometric
+/// signer and answers the service's signing requests (see
+/// [PhoneController]).
 ///
 /// The foreground service's permission requests and startup are
-/// best-effort: a plugin failure there (missing permission, OS quirk, …)
-/// must never prevent the UI itself from showing, so it's caught and
-/// surfaced as a banner instead of propagating.
+/// best-effort: a plugin failure there must never prevent the UI itself
+/// from showing, so it's caught and surfaced as a banner instead.
 Future<void> runPhone() async {
   final kv = FlutterSecureKv();
   final store = PhoneStore(kv);
+  // Touch secure storage from this isolate before the service's isolate
+  // does, so the two engines never race to create its master key.
+  await store.pubKey();
   final gate = ForegroundGate()..attach();
   final signer = BiometricSignatureSigner(store, waitForeground: gate.whenResumed);
-  final controller = PhoneController(
-    store: store,
-    signer: signer,
-    clock: const SystemClock(),
-    gate: gate,
-    linkFactory: (pc, session, onEffect) =>
-        PcLink(pc: pc, session: session, onEffect: onEffect, resolveHost: MdnsFinder().resolveHost),
-  );
+  final controller = PhoneController(transport: uiTaskTransport(), signer: signer, store: store, gate: gate);
+  // Listen before the service starts so its first state isn't missed.
+  await controller.init();
 
   String? serviceError;
   try {
     await requestForegroundPermissions();
-    await startForegroundService();
+    final result = await startForegroundService();
+    if (result is ServiceRequestFailure) serviceError = '${result.error}';
   } on Object catch (e) {
     serviceError = '$e';
   }
 
-  await controller.init();
   runApp(PhoneApp(controller: controller, kv: kv, serviceError: serviceError));
 }
 
@@ -63,10 +63,8 @@ final class PhoneApp extends StatefulWidget {
 }
 
 /// Observes app lifecycle at the root so [PhoneController.shutdown] runs
-/// when the app is torn down — the plan requires every link stopped and
-/// every pending auth notification cancelled before disposal, which
-/// [PhoneController.dispose] alone can't guarantee since
-/// `ChangeNotifier.dispose()` is synchronous (see its own doc comment).
+/// when the UI is torn down: it detaches from the service (whose links keep
+/// running) and from the foreground gate.
 class _PhoneAppState extends State<PhoneApp> with WidgetsBindingObserver {
   @override
   void initState() {
@@ -134,6 +132,8 @@ class _PhoneHomeState extends State<_PhoneHome> {
       );
     }
     await maybeShowBatteryGuide(context, widget.kv);
+    if (!mounted) return;
+    await maybeShowFullScreenGuide(context, widget.kv);
   }
 
   @override
@@ -145,9 +145,20 @@ class _PhoneHomeState extends State<_PhoneHome> {
         isOnline: widget.controller.isOnline,
         needsRepair: widget.controller.needsRepair,
         onScan: () => unawaited(_scan(context)),
-        onRevoke: (pcId) => unawaited(widget.controller.revoke(pcId)),
+        onRevoke: (pcId) => unawaited(_revoke(context, pcId)),
       ),
     );
+  }
+
+  Future<void> _revoke(BuildContext context, String pcId) async {
+    try {
+      await widget.controller.revoke(pcId);
+    } on Object catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Révocation échouée : ${e is StateError ? e.message : e}')),
+      );
+    }
   }
 
   Future<void> _scan(BuildContext context) async {
@@ -161,7 +172,7 @@ class _PhoneHomeState extends State<_PhoneHome> {
     } on Object catch (e) {
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Appairage échoué : $e')),
+        SnackBar(content: Text('Appairage échoué : ${e is StateError ? e.message : e}')),
       );
     }
   }

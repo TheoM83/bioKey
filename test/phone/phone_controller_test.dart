@@ -1,294 +1,137 @@
-import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:biokey/core/protocol/codec.dart';
-import 'package:biokey/core/protocol/messages.dart';
-import 'package:biokey/core/session/clock.dart';
+import 'package:biokey/core/pairing/qr_payload.dart';
 import 'package:biokey/core/storage/phone_store.dart';
 import 'package:biokey/core/storage/secure_kv.dart';
-import 'package:biokey/core/session/phone_session.dart';
-import 'package:biokey/phone/net/pc_link.dart';
 import 'package:biokey/phone/phone_controller.dart';
-import '../support/fake_auth_notifier.dart';
+import 'package:biokey/phone/service/task_transport.dart';
 import '../support/fake_foreground_gate.dart';
 import '../support/fake_signer.dart';
+import '../support/in_memory_task_transport.dart';
 
-/// A controllable fake of [PcLinkApi]: `start`/`stop` just flip [started],
-/// and tests fire effects directly via [FakePcLink.emit] instead of driving
-/// a real socket — [pc_link_test.dart] already covers the real networking.
-final class FakePcLink implements PcLinkApi {
-  FakePcLink(this.pc, this._onEffect);
-  @override
-  PairedPc pc;
-  final void Function(PhoneEffect) _onEffect;
-  bool started = false;
-  int startCalls = 0;
-  int stopCalls = 0;
-  @override
-  bool online = false;
-
-  /// When set, `stop()` doesn't complete until this completes — lets a
-  /// test prove a caller genuinely awaited `stop()` rather than just
-  /// having called it.
-  Completer<void>? stopGate;
-
-  void emit(PhoneEffect e) => _onEffect(e);
-
-  @override
-  Future<void> start() async {
-    startCalls++;
-    started = true;
-  }
-
-  @override
-  Future<void> stop() async {
-    stopCalls++;
-    started = false;
-    final gate = stopGate;
-    if (gate != null) await gate.future;
-  }
-}
+PairedPc makePc(String pcId) => PairedPc(pcId: pcId, name: 'PC $pcId', host: 'h', port: 1, fingerprint: 'fp', session: 'sess');
 
 void main() {
-  late PhoneStore store;
+  late InMemoryTaskLink link;
   late FakeSigner signer;
-  final links = <String, FakePcLink>{};
-  final sessions = <String, PhoneSession>{};
+  late PhoneStore store;
+  late FakeForegroundGate gate;
+  late PhoneController c;
+  final toTask = <Map<String, Object?>>[];
 
-  PairedPc makePc(String pcId) => PairedPc(pcId: pcId, name: 'PC $pcId', host: '127.0.0.1', port: 1, fingerprint: 'fp', session: 'sess');
-
-  PhoneController build({FakeForegroundGate? gate, FakeAuthNotifier? authNotifier}) {
-    links.clear();
-    sessions.clear();
-    return PhoneController(
-      store: store,
-      signer: signer,
-      clock: const SystemClock(),
-      gate: gate ?? FakeForegroundGate(),
-      authNotifier: authNotifier ?? FakeAuthNotifier(),
-      linkFactory: (pc, session, onEffect) {
-        final link = FakePcLink(pc, onEffect);
-        links[pc.pcId] = link;
-        sessions[pc.pcId] = session;
-        return link;
-      },
-    );
+  Future<void> settle() async {
+    for (var i = 0; i < 5; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
   }
 
-  setUp(() {
-    store = PhoneStore(InMemorySecureKv());
+  void publish({List<PairedPc> pcs = const [], List<String> online = const [], List<String> needsRepair = const []}) {
+    link.task.send({
+      'op': TaskOps.state,
+      'pcs': [for (final p in pcs) p.toJson()],
+      'online': online,
+      'needsRepair': needsRepair,
+    });
+  }
+
+  setUp(() async {
+    link = InMemoryTaskLink();
+    toTask.clear();
+    link.task.messages.listen(toTask.add);
     signer = FakeSigner();
+    store = PhoneStore(InMemorySecureKv());
+    gate = FakeForegroundGate()..resume();
+    c = PhoneController(transport: link.ui, signer: signer, store: store, gate: gate, stateRetry: const Duration(milliseconds: 20));
+    await c.init();
   });
 
-  test('init starts one link per stored PC', () async {
-    await store.upsertPc(makePc('a'));
-    await store.upsertPc(makePc('b'));
+  tearDown(() => c.shutdown());
 
-    final ctrl = build();
-    await ctrl.init();
-
-    expect(ctrl.pcs.map((p) => p.pcId).toSet(), {'a', 'b'});
-    expect(links.keys.toSet(), {'a', 'b'});
-    expect(links['a']!.started, isTrue);
-    expect(links['b']!.started, isTrue);
+  test('init asks the service for its state, retrying until it answers', () async {
+    await Future<void>.delayed(const Duration(milliseconds: 70));
+    final asks = toTask.where((m) => m['op'] == TaskOps.getState).length;
+    expect(asks, greaterThanOrEqualTo(2));
+    publish();
+    await Future<void>.delayed(const Duration(milliseconds: 70));
+    expect(toTask.where((m) => m['op'] == TaskOps.getState).length, lessThanOrEqualTo(asks + 1));
   });
 
-  test('starting a link for a PC that already has one stops the old one first', () async {
-    await store.upsertPc(makePc('a'));
-    final ctrl = build();
-    await ctrl.init();
-    final firstLink = links['a']!;
-    expect(firstLink.started, isTrue);
-
-    // init() again simulates re-establishing a link for an already-linked
-    // PC (the same path pair() takes when re-pairing an existing PC).
-    await ctrl.init();
-    final secondLink = links['a']!;
-
-    expect(firstLink.stopCalls, 1, reason: 'the orphaned old link must be stopped, not left running');
-    expect(firstLink.started, isFalse);
-    expect(identical(firstLink, secondLink), isFalse, reason: 'a fresh link replaces the old one');
-    expect(secondLink.started, isTrue);
-  });
-
-  test('revoke of the last PC deletes the key', () async {
-    await store.upsertPc(makePc('a'));
-    final ctrl = build();
-    await ctrl.init();
-
-    await ctrl.revoke('a');
-
-    expect(ctrl.pcs, isEmpty);
-    expect(links['a']!.started, isFalse);
-    expect(links['a']!.stopCalls, 1);
-    expect(await store.pubKey(), isNull);
-    expect(signer.deleteCalls, 1);
-  });
-
-  test('revoke keeps the key while another PC is still paired', () async {
-    await store.upsertPc(makePc('a'));
-    await store.upsertPc(makePc('b'));
-    await store.savePubKey('cached-pub');
-    final ctrl = build();
-    await ctrl.init();
-
-    await ctrl.revoke('a');
-
-    expect(ctrl.pcs.map((p) => p.pcId), ['b']);
-    expect(await store.pubKey(), 'cached-pub');
-    expect(signer.deleteCalls, 0);
-  });
-
-  test('PhoneUnknownByPc marks needsRepair and stops the link', () async {
-    await store.upsertPc(makePc('a'));
-    final ctrl = build();
-    await ctrl.init();
-
-    links['a']!.emit(const PhoneUnknownByPc('a'));
-    await Future<void>.delayed(Duration.zero);
-
-    expect(ctrl.needsRepair, contains('a'));
-    expect(links['a']!.started, isFalse, reason: 'a stale session will never succeed; retrying it is pointless');
-  });
-
-  test('PhonePairedWith for a revoked PC is ignored', () async {
-    await store.upsertPc(makePc('a'));
-    final ctrl = build();
-    await ctrl.init();
-    final staleLink = links['a']!;
-
-    await ctrl.revoke('a');
-    expect(ctrl.pcs, isEmpty);
-
-    // A late-arriving effect from the now-stopped link (e.g. it resolved a
-    // host right as it was being torn down) must not resurrect the PC.
-    staleLink.emit(PhonePairedWith(makePc('a')));
-    await Future<void>.delayed(Duration.zero);
-
-    expect(ctrl.pcs, isEmpty);
-    expect(await store.pcs(), isEmpty);
-  });
-
-  test('PhoneOnlineChanged drives isOnline', () async {
-    await store.upsertPc(makePc('a'));
-    final ctrl = build();
-    await ctrl.init();
-
-    expect(ctrl.isOnline('a'), isFalse);
-
-    links['a']!.emit(const PhoneOnlineChanged('a', true));
-    expect(ctrl.isOnline('a'), isTrue);
-
-    links['a']!.emit(const PhoneOnlineChanged('a', false));
-    expect(ctrl.isOnline('a'), isFalse);
-  });
-
-  test('notifies listeners on relevant effects', () async {
-    await store.upsertPc(makePc('a'));
-    final ctrl = build();
-    await ctrl.init();
-
+  test('mirrors the published state and notifies listeners', () async {
     var notified = 0;
-    ctrl.addListener(() => notified++);
-
-    links['a']!.emit(const PhoneOnlineChanged('a', true));
+    c.addListener(() => notified++);
+    publish(pcs: [makePc('a'), makePc('b')], online: ['a'], needsRepair: ['b']);
+    await settle();
+    expect(c.pcs.map((p) => p.pcId), ['a', 'b']);
+    expect(c.isOnline('a'), isTrue);
+    expect(c.isOnline('b'), isFalse);
+    expect(c.needsRepair, {'b'});
     expect(notified, 1);
   });
 
-  test('an incoming auth while backgrounded shows a notification and cancels it on resume', () async {
-    await store.upsertPc(makePc('a'));
-    final gate = FakeForegroundGate();
-    final authNotifier = FakeAuthNotifier();
-    final ctrl = build(gate: gate, authNotifier: authNotifier);
-    await ctrl.init();
-
-    final pc = ctrl.pcs.single;
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final frame = Codec.encode(AuthMsg(id: 'u1', pcId: 'a', action: 'open', label: 'Mon app', nonce: 'N', iat: now, exp: now + 20));
-    await sessions['a']!.onFrame(pc, frame);
-    // The notification is shown by an un-awaited continuation started
-    // synchronously from onFrame's onAuthShown callback; let it settle.
-    await Future<void>.delayed(Duration.zero);
-    await Future<void>.delayed(Duration.zero);
-
-    expect(authNotifier.initCalls, greaterThanOrEqualTo(1));
-    expect(authNotifier.shown, hasLength(1));
-    expect(authNotifier.shown.single.label, 'Mon app');
-    expect(authNotifier.shown.single.pcName, pc.name);
-    expect(authNotifier.cancelled, isEmpty);
-
-    gate.resume();
-    await Future<void>.delayed(Duration.zero);
-    await Future<void>.delayed(Duration.zero);
-    expect(authNotifier.cancelled, [authNotifier.shown.single.id]);
+  test('pair sends the QR and resolves with the paired PC', () async {
+    const qr = QrPayload(pcId: 'n', name: 'PC n', host: 'h', port: 1, fingerprint: 'fp', token: 't');
+    final pairing = c.pair(qr);
+    await settle();
+    final cmd = toTask.singleWhere((m) => m['op'] == TaskOps.pair);
+    expect(QrPayload.parse(cmd['qr']! as String), qr);
+    link.task.send({'op': TaskOps.pairResult, 'reqId': cmd['reqId'], 'ok': true, 'pc': makePc('n').toJson()});
+    expect((await pairing).pcId, 'n');
   });
 
-  test('an incoming auth while foregrounded does not notify', () async {
-    await store.upsertPc(makePc('a'));
-    final gate = FakeForegroundGate()..resume();
-    final authNotifier = FakeAuthNotifier();
-    final ctrl = build(gate: gate, authNotifier: authNotifier);
-    await ctrl.init();
-
-    final pc = ctrl.pcs.single;
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final frame = Codec.encode(AuthMsg(id: 'u1', pcId: 'a', action: 'open', label: 'Mon app', nonce: 'N', iat: now, exp: now + 20));
-    await sessions['a']!.onFrame(pc, frame);
-    await Future<void>.delayed(Duration.zero);
-
-    expect(authNotifier.shown, isEmpty);
+  test('pair throws the service-side reason on failure', () async {
+    const qr = QrPayload(pcId: 'n', name: 'PC n', host: 'h', port: 1, fingerprint: 'fp', token: 't');
+    final pairing = c.pair(qr);
+    await settle();
+    final cmd = toTask.singleWhere((m) => m['op'] == TaskOps.pair);
+    link.task.send({'op': TaskOps.pairResult, 'reqId': cmd['reqId'], 'ok': false, 'error': 'appairage refusé'});
+    await expectLater(pairing, throwsA(isA<StateError>().having((e) => e.message, 'message', 'appairage refusé')));
   });
 
-  test('shutdown() completes only after all links\' stop() futures complete', () async {
-    await store.upsertPc(makePc('a'));
-    await store.upsertPc(makePc('b'));
-    final ctrl = build();
-    await ctrl.init();
-
-    final gateA = Completer<void>();
-    final gateB = Completer<void>();
-    links['a']!.stopGate = gateA;
-    links['b']!.stopGate = gateB;
-
-    var shutdownCompleted = false;
-    final shutdownFuture = ctrl.shutdown().whenComplete(() => shutdownCompleted = true);
-
-    await Future<void>.delayed(Duration.zero);
-    expect(shutdownCompleted, isFalse, reason: 'still waiting on both links\' stop() to complete');
-
-    gateA.complete();
-    await Future<void>.delayed(Duration.zero);
-    expect(shutdownCompleted, isFalse, reason: 'still waiting on b\'s stop()');
-
-    gateB.complete();
-    await shutdownFuture;
-
-    expect(shutdownCompleted, isTrue);
-    expect(links['a']!.stopCalls, 1);
-    expect(links['b']!.stopCalls, 1);
+  test('revoke completes once the service acknowledges it', () async {
+    var done = false;
+    final revoking = c.revoke('a').then((_) => done = true);
+    await settle();
+    final cmd = toTask.singleWhere((m) => m['op'] == TaskOps.revoke);
+    expect(cmd['pcId'], 'a');
+    expect(done, isFalse);
+    link.task.send({'op': TaskOps.revoked, 'reqId': cmd['reqId']});
+    await revoking;
+    expect(done, isTrue);
   });
 
-  test('shutdown() detaches the gate and cancels a pending auto-cancel notification wait', () async {
-    await store.upsertPc(makePc('a'));
-    final gate = FakeForegroundGate();
-    final authNotifier = FakeAuthNotifier();
-    final ctrl = build(gate: gate, authNotifier: authNotifier);
-    await ctrl.init();
+  test('answers ping with pong, and signer requests with the real signer', () async {
+    link.task.send({'op': TaskOps.ping, 'reqId': 'p1'});
+    link.task.send({'op': TaskOps.ensurePublicKey, 'reqId': 'k1'});
+    link.task.send({'op': TaskOps.sign, 'reqId': 's1', 'payload': 'X', 'prompt': 'Ouvrir A sur PC ?'});
+    link.task.send({'op': TaskOps.deleteKey, 'reqId': 'd1'});
+    await settle();
+    Map<String, Object?> reply(String reqId) => toTask.singleWhere((m) => m['reqId'] == reqId);
+    expect(reply('p1')['op'], TaskOps.pong);
+    expect(reply('k1')['pub'], signer.keys.pubSpkiB64);
+    expect(reply('s1')['op'], TaskOps.sig);
+    expect(signer.prompts, ['Ouvrir A sur PC ?']);
+    expect(reply('d1')['op'], TaskOps.ok);
+    expect(signer.deleteCalls, 1);
+  });
 
-    final pc = ctrl.pcs.single;
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final frame = Codec.encode(AuthMsg(id: 'u1', pcId: 'a', action: 'open', label: 'Mon app', nonce: 'N', iat: now, exp: now + 20));
-    await sessions['a']!.onFrame(pc, frame);
-    await Future<void>.delayed(Duration.zero);
-    await Future<void>.delayed(Duration.zero);
-    expect(authNotifier.shown, hasLength(1), reason: 'sanity: the notification was actually shown');
-    expect(authNotifier.cancelled, isEmpty);
+  test('once paired PCs are known, a changed public key makes the service reconnect', () async {
+    await store.savePubKey('OLD-KEY');
+    publish(pcs: [makePc('a')]);
+    await settle();
+    expect(toTask.where((m) => m['op'] == TaskOps.refresh), hasLength(1));
+  });
 
-    // The app never resumes; shutdown() must still cancel the notification
-    // and stop waiting on it, instead of leaving that 35s wait running
-    // past disposal.
-    await ctrl.shutdown().timeout(const Duration(seconds: 1));
+  test('an unchanged public key does not trigger a refresh', () async {
+    await store.savePubKey(signer.keys.pubSpkiB64);
+    publish(pcs: [makePc('a')]);
+    await settle();
+    expect(toTask.where((m) => m['op'] == TaskOps.refresh), isEmpty);
+  });
 
-    expect(authNotifier.cancelled, [authNotifier.shown.single.id]);
+  test('shutdown detaches the gate and fails pending commands', () async {
+    final revoking = expectLater(c.revoke('a'), throwsA(isA<StateError>()));
+    await settle();
+    await c.shutdown();
+    await revoking;
     expect(gate.detached, isTrue);
   });
 }

@@ -1,10 +1,10 @@
-import 'package:biokey/phone/service/foreground.dart';
+import 'package:biokey/phone/service/proxy_signer.dart';
 
 /// Records every notification shown/cancelled instead of touching the
 /// real `flutter_local_notifications` platform channel.
 class FakeAuthNotifier implements AuthNotifierApi {
   int initCalls = 0;
-  final shown = <({int id, String label, String pcName})>[];
+  final shown = <({int id, String body})>[];
   final cancelled = <int>[];
 
   @override
@@ -13,8 +13,8 @@ class FakeAuthNotifier implements AuthNotifierApi {
   }
 
   @override
-  Future<void> showAuthPrompt({required int id, required String label, required String pcName}) async {
-    shown.add((id: id, label: label, pcName: pcName));
+  Future<void> show({required int id, required String body}) async {
+    shown.add((id: id, body: body));
   }
 
   @override

@@ -53,8 +53,9 @@ final class BiometricSignatureSigner implements BiometricSigner {
         await waitForeground();
       } on Object {
         // Android cannot show a BiometricPrompt from a backgrounded
-        // activity; if we never got foregrounded in time, don't even try.
-        throw BiometricFailed('application en arrière-plan');
+        // activity; if we never got foregrounded in time, don't even try —
+        // and report it as a timeout, not a biometric failure.
+        throw BiometricTimeout('application en arrière-plan');
       }
     }
     final result = await _bs.createSignature(

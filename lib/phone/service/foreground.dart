@@ -1,26 +1,78 @@
 import 'dart:async';
 import 'dart:io';
+
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
-/// No-op task handler: BioKey doesn't run periodic work in the foreground
-/// task, it only needs the persistent Android notification (and the process
-/// priority that comes with it) to keep the WebSocket links to paired PCs
-/// alive while the app is backgrounded.
+import '../../core/session/clock.dart';
+import '../../core/storage/phone_store.dart';
+import '../../platform/flutter_secure_kv.dart';
+import '../net/mdns_finder.dart';
+import '../net/pc_link.dart';
+import 'link_coordinator.dart';
+import 'proxy_signer.dart';
+import 'task_transport.dart';
+
+/// Entry point of the foreground-service isolate (also used by the plugin's
+/// boot receiver: `autoRunOnBoot`), which owns every link to paired PCs.
 @pragma('vm:entry-point')
-void biokeyForegroundStartCallback() {
-  FlutterForegroundTask.setTaskHandler(_BiokeyTaskHandler());
+void startCallback() {
+  FlutterForegroundTask.setTaskHandler(BiokeyTaskHandler());
 }
 
-final class _BiokeyTaskHandler extends TaskHandler {
+/// Runs the phone's network side ([LinkCoordinator]) in the service
+/// isolate. Its signer is a [ProxySigner] to the UI isolate, which owns the
+/// biometric key; with no UI attached it launches the app / shows the
+/// full-screen auth notification first.
+final class BiokeyTaskHandler extends TaskHandler {
+  final _transport = CallbackTaskTransport((m) => FlutterForegroundTask.sendDataToMain(m));
+  ProxySigner? _signer;
+  TaskBackend? _backend;
+
   @override
-  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {}
+  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
+    // flutter_secure_storage only needs the application context, which the
+    // service's engine has: the service reads/writes the PC list itself.
+    final store = PhoneStore(FlutterSecureKv());
+    final signer = ProxySigner(
+      send: _transport.send,
+      isAppOnForeground: () => FlutterForegroundTask.isAppOnForeground,
+      launchApp: FlutterForegroundTask.launchApp,
+      notifier: AuthNotifier(),
+      cachedPublicKey: store.pubKey,
+    );
+    final mdns = MdnsFinder();
+    final coordinator = LinkCoordinator(
+      store: store,
+      signer: signer,
+      clock: const SystemClock(),
+      send: _transport.send,
+      linkFactory: (pc, session, onEffect) =>
+          PcLink(pc: pc, session: session, onEffect: onEffect, resolveHost: mdns.resolveHost),
+      pairer: (qr, session, onEffect) =>
+          PcLink.pair(qr: qr, session: session, onEffect: onEffect, resolveHost: mdns.resolveHost),
+    );
+    final backend = TaskBackend(transport: _transport, coordinator: coordinator, replies: signer.handleMessage);
+    _signer = signer;
+    _backend = backend;
+    await backend.start();
+  }
+
+  @override
+  void onReceiveData(Object data) => _transport.deliver(data);
 
   @override
   void onRepeatEvent(DateTime timestamp) {}
 
   @override
-  Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {}
+  void onNotificationPressed() => FlutterForegroundTask.launchApp();
+
+  @override
+  Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {
+    _signer?.dispose();
+    await _backend?.stop();
+    await _transport.close();
+  }
 }
 
 /// Requests the permissions the foreground service needs: notification
@@ -37,9 +89,7 @@ Future<void> requestForegroundPermissions() async {
   }
 }
 
-/// Initializes and starts the persistent foreground service that keeps
-/// BioKey's paired-PC links alive while the app is backgrounded.
-Future<ServiceRequestResult> startForegroundService() async {
+void _initForegroundTask() {
   FlutterForegroundTask.init(
     androidNotificationOptions: AndroidNotificationOptions(
       channelId: 'biokey_foreground',
@@ -53,50 +103,50 @@ Future<ServiceRequestResult> startForegroundService() async {
       autoRunOnBoot: true,
       autoRunOnMyPackageReplaced: true,
       allowWakeLock: true,
+      allowWifiLock: true,
     ),
-  );
-  if (await FlutterForegroundTask.isRunningService) {
-    return FlutterForegroundTask.restartService();
-  }
-  return FlutterForegroundTask.startService(
-    notificationTitle: 'BioKey',
-    notificationText: 'BioKey veille sur vos PC',
-    callback: biokeyForegroundStartCallback,
   );
 }
 
-/// The operations [PhoneController] needs from the `biokey_auth` notifier,
-/// extracted so tests can inject a fake instead of touching the real
-/// `flutter_local_notifications` platform channel.
-abstract interface class AuthNotifierApi {
-  Future<void> init();
-  Future<void> showAuthPrompt({required int id, required String label, required String pcName});
-  Future<void> cancel(int id);
+/// Starts the persistent `connectedDevice` foreground service that owns the
+/// links to paired PCs — or, if it already runs (e.g. started at boot),
+/// leaves it alone: restarting it would drop every live link.
+Future<ServiceRequestResult> startForegroundService() async {
+  _initForegroundTask();
+  if (await FlutterForegroundTask.isRunningService) {
+    return const ServiceRequestSuccess();
+  }
+  return FlutterForegroundTask.startService(
+    serviceTypes: const [ForegroundServiceTypes.connectedDevice],
+    notificationTitle: 'BioKey',
+    notificationText: 'BioKey veille sur vos PC',
+    callback: startCallback,
+  );
+}
+
+/// The UI isolate's end of the channel to the service.
+CallbackTaskTransport uiTaskTransport() {
+  FlutterForegroundTask.initCommunicationPort();
+  final t = CallbackTaskTransport((m) => FlutterForegroundTask.sendDataToTask(m));
+  FlutterForegroundTask.addTaskDataCallback(t.deliver);
+  return t;
 }
 
 /// The Android notification channel used to alert the user of an incoming
-/// biometric authentication request (`PhoneAuthShown`) while BioKey is
-/// backgrounded — high-priority/full-screen so it surfaces immediately,
-/// since the biometric prompt itself is already showing by the time this
-/// fires (the phone session invokes its `onAuthShown` callback *before*
-/// calling into the biometric signer, not after).
+/// biometric authentication request while BioKey isn't in front —
+/// high-priority / full-screen so it surfaces immediately, including over
+/// the lock screen (the activity is `showWhenLocked`/`turnScreenOn`).
 final class AuthNotifier implements AuthNotifierApi {
   static const _channelId = 'biokey_auth';
+  static const _channelName = 'Demandes d’authentification';
+  static const _channelDescription = 'Alerte quand un PC appairé demande une authentification biométrique';
 
   final _plugin = FlutterLocalNotificationsPlugin();
 
-  /// The in-flight (or completed) initialization, memoised so concurrent
-  /// callers share the same attempt instead of racing two
-  /// `initialize`/`createNotificationChannel` calls. Cleared on failure so
-  /// the *next* call retries from scratch rather than being stuck forever
-  /// returning an already-failed future.
+  /// Memoised in-flight/complete initialisation; cleared on failure so the
+  /// next call retries.
   Future<void>? _initFuture;
 
-  /// Idempotent and safe to call concurrently: safe to call before every
-  /// [showAuthPrompt] without re-registering the notification channel each
-  /// time, and a caller that starts init() while another init() is still
-  /// running gets that same in-flight attempt rather than starting a
-  /// second one.
   @override
   Future<void> init() {
     final existing = _initFuture;
@@ -104,8 +154,6 @@ final class AuthNotifier implements AuthNotifierApi {
     final future = _doInit();
     _initFuture = future;
     unawaited(future.catchError((Object _) {
-      // Let the next init() call try again instead of every future call
-      // replaying this same failure forever.
       _initFuture = null;
     }));
     return future;
@@ -117,27 +165,22 @@ final class AuthNotifier implements AuthNotifierApi {
     await _plugin
         .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
         ?.createNotificationChannel(
-          const AndroidNotificationChannel(
-            _channelId,
-            'Demandes d’authentification',
-            description: 'Alerte quand un PC appairé demande une authentification biométrique',
-            importance: Importance.max,
-          ),
+          const AndroidNotificationChannel(_channelId, _channelName, description: _channelDescription, importance: Importance.max),
         );
   }
 
   @override
-  Future<void> showAuthPrompt({required int id, required String label, required String pcName}) async {
+  Future<void> show({required int id, required String body}) async {
     await init();
     await _plugin.show(
       id: id,
       title: 'BioKey',
-      body: 'Ouvrir $label sur $pcName ?',
+      body: body,
       notificationDetails: const NotificationDetails(
         android: AndroidNotificationDetails(
           _channelId,
-          'Demandes d’authentification',
-          channelDescription: 'Alerte quand un PC appairé demande une authentification biométrique',
+          _channelName,
+          channelDescription: _channelDescription,
           importance: Importance.max,
           priority: Priority.high,
           fullScreenIntent: true,
