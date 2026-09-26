@@ -33,6 +33,15 @@ final class PhoneAuthShown extends PhoneEffect {
   final String label, pcName;
 }
 
+/// Emitted by [PcLink] (never by [PhoneSession] itself) when the link to a
+/// paired PC transitions between online and offline, so [PhoneController]
+/// can track connectivity without polling.
+final class PhoneOnlineChanged extends PhoneEffect {
+  const PhoneOnlineChanged(this.pcId, this.online);
+  final String pcId;
+  final bool online;
+}
+
 final class PhoneSession {
   PhoneSession({required BiometricSigner signer, required Clock clock})
       : _signer = signer,
