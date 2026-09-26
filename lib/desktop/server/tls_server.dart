@@ -78,8 +78,17 @@ final class TlsServer implements LinkServerApi {
     _tick = Timer.periodic(const Duration(seconds: 1), (_) => apply(session.tick()));
     _ping = Timer.periodic(pingInterval, (_) {
       final frame = encodeFrame(Codec.encode(const PingMsg()));
-      for (final socket in _conns.values) {
-        socket.add(frame);
+      // Snapshot the ids first: a failed write drops the connection (see
+      // _dropConnection), which mutates _conns — iterating it directly
+      // while removing entries from it would throw.
+      for (final connId in _conns.keys.toList()) {
+        final socket = _conns[connId];
+        if (socket == null) continue;
+        try {
+          socket.add(frame);
+        } on Object {
+          _dropConnection(connId);
+        }
       }
     });
   }
@@ -93,24 +102,32 @@ final class TlsServer implements LinkServerApi {
     final connId = 'c${++_seq}';
     _conns[connId] = socket;
     _armIdle(connId, unauthIdle);
-    var gone = false;
-    void onGone() {
-      if (gone) return;
-      gone = true;
-      socket.destroy();
-      _forget(connId);
-      apply(session.onDisconnect(connId));
-    }
 
     FrameDecoder().bind(socket).listen(
       (payload) {
         _armIdle(connId, _idleFor[connId] ?? unauthIdle);
         apply(session.onFrame(connId, payload));
       },
-      onDone: onGone,
-      onError: (Object _) => onGone(),
+      onDone: () => _dropConnection(connId),
+      onError: (Object _) => _dropConnection(connId),
       cancelOnError: true,
     );
+  }
+
+  /// Idempotent teardown for one connection: destroys the socket (unless
+  /// already forgotten) and applies the session's `onDisconnect` effects.
+  /// Called both when the socket's own stream ends/errors and when a write
+  /// to it fails (a socket that can no longer be written to — e.g. the
+  /// peer reset the connection — is just as gone as one whose read side
+  /// closed; dropping it here, rather than letting the exception escape
+  /// [apply] or the ping timer, keeps one dead socket from taking either
+  /// down).
+  void _dropConnection(String connId) {
+    final socket = _conns[connId];
+    if (socket == null) return;
+    _forget(connId);
+    socket.destroy();
+    apply(session.onDisconnect(connId));
   }
 
   void _armIdle(String connId, Duration d) {
@@ -161,7 +178,11 @@ final class TlsServer implements LinkServerApi {
           final socket = _conns[e.connId];
           if (socket != null) {
             _observeOutgoing(e.connId, e.frame);
-            socket.add(encodeFrame(e.frame));
+            try {
+              socket.add(encodeFrame(e.frame));
+            } on Object {
+              _dropConnection(e.connId);
+            }
           }
         case CloseConn():
           final socket = _conns[e.connId];

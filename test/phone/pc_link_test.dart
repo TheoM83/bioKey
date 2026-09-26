@@ -1,11 +1,16 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:biokey/core/crypto/identity.dart';
 import 'package:biokey/core/crypto/verify.dart';
 import 'package:biokey/core/pairing/qr_payload.dart';
+import 'package:biokey/core/protocol/codec.dart';
+import 'package:biokey/core/protocol/framing.dart';
+import 'package:biokey/core/protocol/messages.dart';
 import 'package:biokey/core/session/clock.dart';
 import 'package:biokey/core/session/desktop_session.dart';
 import 'package:biokey/core/session/phone_session.dart';
+import 'package:biokey/core/storage/phone_store.dart';
 import 'package:biokey/desktop/server/tls_server.dart';
 import 'package:biokey/phone/net/pc_link.dart';
 import 'package:biokey/phone/net/pinned_socket.dart';
@@ -35,6 +40,10 @@ void main() {
     final paired = await PcLink.pair(qr: qr, session: ps, onEffect: phoneFx.add).timeout(const Duration(seconds: 5));
     expect(paired.pcId, id.pcId);
     expect(ds.phone!.pub, signer.keys.pubSpkiB64);
+    // pair()'s own teardown already drained the peer's close echo, so the
+    // desktop has run its onDisconnect by the time we get here — no race
+    // with a fresh PcLink opening a new connection right after.
+    expect(ds.phoneOnline, isFalse);
 
     final link = PcLink(pc: paired, session: ps, onEffect: phoneFx.add);
     await link.start();
@@ -244,6 +253,51 @@ void main() {
     sw.stop();
 
     expect(sw.elapsedMilliseconds, lessThan(500), reason: 'stop() must wake the backoff sleep, not sit through it');
+  });
+
+  test('short liveness intervals: pings are sent at the idle interval, and the link closes after the no-receive timeout', () async {
+    // A bare TLS stub that never replies to anything (not even the desktop's
+    // usual pong) — isolates PcLink's own liveness behaviour (driven by a
+    // monotonic Stopwatch, not DateTime.now()) from the real server's.
+    final stub = await SecureServerSocket.bind('127.0.0.1', 0, id.securityContext());
+    final pings = <String>[];
+    final closed = Completer<void>();
+    final sub = stub.listen((socket) {
+      FrameDecoder().bind(socket).listen(
+        (frame) {
+          if (Codec.decode(frame) is PingMsg) pings.add(frame);
+        },
+        onDone: () {
+          if (!closed.isCompleted) closed.complete();
+        },
+        onError: (Object _) {
+          if (!closed.isCompleted) closed.complete();
+        },
+      );
+    });
+
+    final pc = PairedPc(pcId: 'stub', name: 'Stub', host: '127.0.0.1', port: stub.port, fingerprint: id.fingerprintB64Url, session: 'sess');
+    final ps = PhoneSession(signer: FakeSigner(), clock: const SystemClock());
+    // The liveness/ping check itself only runs once a second (see
+    // PcLink._loop), so "short" here means short relative to the real
+    // defaults (30s/60s), not sub-second.
+    final link = PcLink(
+      pc: pc,
+      session: ps,
+      onEffect: (_) {},
+      pingInterval: const Duration(seconds: 1),
+      livenessTimeout: const Duration(seconds: 3),
+    );
+    await link.start();
+
+    await _until(() => pings.length >= 2, timeout: const Duration(seconds: 10));
+    expect(pings.length, greaterThanOrEqualTo(2), reason: 'a ping is sent every pingInterval while the link is otherwise idle');
+
+    await closed.future.timeout(const Duration(seconds: 10), onTimeout: () => fail('the link never closed after the no-receive liveness timeout'));
+
+    await link.stop();
+    await sub.cancel();
+    await stub.close();
   });
 }
 

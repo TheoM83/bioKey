@@ -19,6 +19,10 @@ typedef Pairer = Future<PairedPc> Function(QrPayload qr, PhoneSession session, v
 ///
 /// The QR fingerprint stays the pin either way: accepting a hostname here
 /// widens *reachability*, never the security boundary.
+///
+/// `host:port` is rejected on purpose: the port is never user-supplied
+/// here — it stays whatever was already stored for the paired PC (see
+/// [LinkCoordinator._setHost]) — so a manual host is a bare address/name.
 bool isValidHost(String host) {
   if (host.isEmpty || host.length > 253 || host.contains(' ')) return false;
   if (InternetAddress.tryParse(host) != null) return true;

@@ -56,13 +56,22 @@ final class PcLink implements PcLinkApi {
     Connect? connect,
     Future<String?> Function(String pcId)? resolveHost,
     Backoff? backoff,
+    this.pingInterval = const Duration(seconds: 30),
+    this.livenessTimeout = const Duration(seconds: 60),
   })  : _session = session,
         _connect = connect ?? _defaultConnect,
         _resolve = resolveHost,
         _backoff = backoff ?? defaultBackoff;
 
-  static const pingInterval = Duration(seconds: 30);
-  static const livenessTimeout = Duration(seconds: 60);
+  /// How long the connection may sit idle (no frame sent) before a protocol
+  /// `ping` is sent to keep it alive. Injectable so tests can use short
+  /// intervals instead of waiting out the real defaults.
+  final Duration pingInterval;
+
+  /// How long with no frame received at all (in either direction) before
+  /// the connection is considered dead and closed. Injectable for the same
+  /// reason as [pingInterval].
+  final Duration livenessTimeout;
 
   static Future<SecureSocket> _defaultConnect(String h, int p, String fp) => connectPinned(host: h, port: p, fingerprint: fp);
 
@@ -105,10 +114,14 @@ final class PcLink implements PcLinkApi {
   String? _pendingHost;
   bool _preferPending = true;
 
-  /// Last time a frame was sent/received on the current socket; drives the
-  /// idle-ping and liveness-close rules. Reset for each new connection.
-  DateTime _lastSentAt = DateTime.now();
-  DateTime _lastRecvAt = DateTime.now();
+  /// Time elapsed since a frame was last sent/received on the current
+  /// socket; drives the idle-ping and liveness-close rules. Backed by a
+  /// monotonic [Stopwatch] (never [DateTime.now]) so a wall-clock jump —
+  /// e.g. an NTP correction or the user changing the system clock — can
+  /// never make a healthy link look idle/dead, or vice versa. Reset (never
+  /// replaced) for each new connection.
+  final Stopwatch _sentSw = Stopwatch();
+  final Stopwatch _recvSw = Stopwatch();
 
   @override
   Future<void> start() async {
@@ -185,8 +198,8 @@ final class PcLink implements PcLinkApi {
         _apply(await _session.hello(pc), ws, gen);
         if (_stale(gen)) return;
         final socket = ws;
-        _lastSentAt = DateTime.now();
-        _lastRecvAt = DateTime.now();
+        _sentSw..reset()..start();
+        _recvSw..reset()..start();
         // A silent Wi-Fi drop leaves a TCP socket that never sees a
         // FIN/RST; this liveness timer forces the connection to close
         // (ending the `await for` below) within a bounded time instead of
@@ -194,15 +207,14 @@ final class PcLink implements PcLinkApi {
         // protocol ping so the PC's own liveness rule doesn't close it.
         liveness = Timer.periodic(const Duration(seconds: 1), (_) {
           if (_stale(gen)) return;
-          final now = DateTime.now();
-          if (now.difference(_lastRecvAt) >= livenessTimeout) {
+          if (_recvSw.elapsed >= livenessTimeout) {
             socket.destroy();
             return;
           }
-          if (now.difference(_lastSentAt) >= pingInterval) {
+          if (_sentSw.elapsed >= pingInterval) {
             try {
               socket.add(encodeFrame(Codec.encode(const PingMsg())));
-              _lastSentAt = now;
+              _sentSw.reset();
             } on Object {
               // Socket already closed underneath us: the read loop will
               // notice and reconnect.
@@ -216,7 +228,7 @@ final class PcLink implements PcLinkApi {
         var chain = Future<void>.value();
         await for (final data in FrameDecoder().bind(socket)) {
           if (_stale(gen)) break;
-          _lastRecvAt = DateTime.now();
+          _recvSw.reset();
           chain = chain.then((_) => _handle(data, socket, host, gen));
         }
         // That connect attempt is now settled (success or failure): the
@@ -228,6 +240,8 @@ final class PcLink implements PcLinkApi {
         if (_pendingHost != null) _preferPending = !_preferPending;
       } finally {
         liveness?.cancel();
+        _sentSw.stop();
+        _recvSw.stop();
         final leaked = ws;
         if (leaked != null) {
           leaked.destroy();
@@ -311,7 +325,7 @@ final class PcLink implements PcLinkApi {
         case PhoneSend():
           try {
             ws.add(encodeFrame(e.frame));
-            _lastSentAt = DateTime.now();
+            _sentSw.reset();
           } on Object {
             // Socket already closed underneath us: the reconnect loop owns it.
           }
@@ -404,7 +418,10 @@ final class PcLink implements PcLinkApi {
     }
     bindSocket(ws);
     if (isCancelled()) {
-      await ws.close();
+      // The overall pair() call already gave up (60s timeout): destroy
+      // outright rather than a graceful close(), which would wait on a
+      // TLS close handshake with a peer nobody is listening for anymore.
+      ws.destroy();
       throw StateError('appairage: délai dépassé pendant la connexion');
     }
     // Buffer through a controller so the socket itself is never paused

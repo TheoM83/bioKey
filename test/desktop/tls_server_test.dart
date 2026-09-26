@@ -37,8 +37,14 @@ void main() {
   });
   tearDown(() => server.stop());
 
-  test('handshake fails when fingerprint does not match', () async {
-    expect(connectPinned('127.0.0.1', server.port, 'wrong').timeout(const Duration(seconds: 5)), throwsA(anything));
+  test('handshake fails when fingerprint does not match, and no connection is left registered', () async {
+    await expectLater(
+      connectPinned('127.0.0.1', server.port, 'wrong').timeout(const Duration(seconds: 5)),
+      throwsA(isA<HandshakeException>()),
+    );
+    // Give the server a beat to notice the aborted handshake.
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(server.connections, isEmpty);
   });
 
   test('pair then auth over real pinned TLS', () async {
@@ -70,6 +76,27 @@ void main() {
     final done = Completer<void>();
     socket.listen((_) {}, onDone: done.complete, onError: (Object _) => done.complete());
     socket.add(encodeFrame('nope'));
+    await done.future.timeout(const Duration(seconds: 2));
+  });
+
+  test('a length prefix of exactly the max frame size is accepted; one byte over is rejected', () async {
+    // At the limit: the header alone must not get the socket closed — the
+    // decoder should be waiting for a body, not rejecting outright.
+    final atLimit = await connectPinned('127.0.0.1', server.port, id.fingerprintB64Url);
+    var atLimitClosed = false;
+    atLimit.listen((_) {}, onDone: () => atLimitClosed = true, onError: (Object _) => atLimitClosed = true);
+    final okHeader = ByteData(4)..setUint32(0, maxFrameBytes);
+    atLimit.add(okHeader.buffer.asUint8List());
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(atLimitClosed, isFalse, reason: '65536 is exactly maxFrameBytes and must be accepted, not rejected');
+    await atLimit.close();
+
+    // One byte over: rejected as soon as the header is read.
+    final overLimit = await connectPinned('127.0.0.1', server.port, id.fingerprintB64Url);
+    final done = Completer<void>();
+    overLimit.listen((_) {}, onDone: done.complete, onError: (Object _) => done.complete());
+    final badHeader = ByteData(4)..setUint32(0, maxFrameBytes + 1);
+    overLimit.add(badHeader.buffer.asUint8List());
     await done.future.timeout(const Duration(seconds: 2));
   });
 
