@@ -5,6 +5,19 @@ import 'dart:typed_data';
 import 'package:pointycastle/asn1.dart';
 import 'package:pointycastle/export.dart';
 
+/// Local stand-in for `package:meta`'s `@visibleForTesting`: marks a
+/// declaration that is public only so a test in another file can exercise
+/// it directly. Defined here (private to this file) rather than depending
+/// on `package:meta` because `pubspec.yaml` is out of scope for this change
+/// (`meta` is only a transitive dependency today), and kept private so it
+/// can't collide with the real `@visibleForTesting` other files import from
+/// `package:flutter/foundation.dart`.
+class _VisibleForTesting {
+  const _VisibleForTesting();
+}
+
+const _VisibleForTesting _visibleForTesting = _VisibleForTesting();
+
 final class DesktopIdentity {
   DesktopIdentity._({required this.certPem, required this.keyPem, required this.fingerprintB64Url, required this.pcId});
   final String certPem;
@@ -104,7 +117,12 @@ ASN1Object _explicit(int tag, ASN1Object inner) => ASN1Object(tag: tag)..valueBy
 /// otherwise. `ASN1GeneralizedTime.encode()` in pointycastle 4.0.0 does not
 /// zero-pad month/day/hour/minute/second, so the GeneralizedTime branch is
 /// built by hand rather than delegated to that class.
-ASN1Object _time(DateTime dt) {
+///
+/// Exposed (not prefixed with `_`) and annotated `@_visibleForTesting`
+/// purely so a test can exercise both branches directly, without needing a
+/// certificate whose validity dates happen to straddle year 2050.
+@_visibleForTesting
+ASN1Object encodeAsn1Time(DateTime dt) {
   final utc = dt.toUtc();
   if (utc.year >= 1950 && utc.year < 2050) {
     return ASN1UtcTime(utc);
@@ -170,7 +188,7 @@ ASN1Sequence _buildTbsCertificate({required String pcName, required ECPublicKey 
     serial,
     _algorithmIdSeq(_oidEcdsaWithSha256),
     name,
-    ASN1Sequence(elements: [_time(notBefore), _time(notAfter)]),
+    ASN1Sequence(elements: [encodeAsn1Time(notBefore), encodeAsn1Time(notAfter)]),
     name,
     _spkiSeq(pub),
     _explicit(0xA3, ASN1Sequence(elements: [_basicConstraintsExtension(), _subjectAltNameExtension()])),
