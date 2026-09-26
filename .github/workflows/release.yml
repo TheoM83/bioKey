@@ -32,7 +32,9 @@ jobs:
 
   windows:
     name: Build Windows installer
-    runs-on: windows-latest
+    # See ci.yml: windows-latest now resolves to windows-2025-vs2026 (VS2026
+    # only), which Flutter 3.35's CMake generator detection can't handle.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - name: Enable symlinks without Developer Mode

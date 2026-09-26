@@ -52,7 +52,12 @@ jobs:
   windows:
     name: Build Windows
     needs: analyze-test
-    runs-on: windows-latest
+    # Pinned to windows-2022 (real Visual Studio 2022): windows-latest now
+    # resolves to windows-2025-vs2026, whose VS2026 toolchain isn't
+    # detected by Flutter 3.35, which then falls back to a broken
+    # "Visual Studio 16 2019" CMake generator that doesn't exist on the
+    # image (https://github.com/flutter/flutter/issues/180481).
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - name: Enable symlinks without Developer Mode
