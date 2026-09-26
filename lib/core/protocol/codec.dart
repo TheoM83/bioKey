@@ -34,8 +34,8 @@ abstract final class Codec {
       'pair' => PairMsg(token: s('token'), name: s('name'), pub: s('pub')),
       'pair_challenge' => PairChallengeMsg(nonce: s('nonce')),
       'pair_proof' => PairProofMsg(sig: s('sig')),
-      'paired' => PairedMsg(pcId: s('pcId'), name: s('name')),
-      'hello' => HelloMsg(pcId: s('pcId'), pub: s('pub')),
+      'paired' => PairedMsg(pcId: s('pcId'), name: s('name'), session: s('session')),
+      'hello' => HelloMsg(pcId: s('pcId'), pub: s('pub'), session: s('session')),
       'welcome' => const WelcomeMsg(),
       'unknown' => const UnknownMsg(),
       'auth' => AuthMsg(

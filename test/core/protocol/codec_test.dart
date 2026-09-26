@@ -9,8 +9,8 @@ void main() {
         const PairMsg(token: 't', name: 'Nothing Phone', pub: 'PUB'),
         const PairChallengeMsg(nonce: 'N'),
         const PairProofMsg(sig: 'S'),
-        const PairedMsg(pcId: 'abcd', name: 'PC-MAISON'),
-        const HelloMsg(pcId: 'abcd', pub: 'PUB'),
+        const PairedMsg(pcId: 'abcd', name: 'PC-MAISON', session: 'SESS'),
+        const HelloMsg(pcId: 'abcd', pub: 'PUB', session: 'SESS'),
         const WelcomeMsg(),
         const UnknownMsg(),
         const AuthMsg(id: 'u1', pcId: 'abcd', action: 'open', label: 'Mon app', nonce: 'N', iat: 100, exp: 130),
@@ -32,11 +32,11 @@ void main() {
 
     test('pair and hello carry v=1', () {
       expect(Codec.encode(const PairMsg(token: 't', name: 'n', pub: 'p')), contains('"v":1'));
-      expect(Codec.encode(const HelloMsg(pcId: 'x', pub: 'p')), contains('"v":1'));
+      expect(Codec.encode(const HelloMsg(pcId: 'x', pub: 'p', session: 's')), contains('"v":1'));
     });
 
     test('rejects wrong version', () {
-      expect(() => Codec.decode('{"type":"hello","v":2,"pcId":"x","pub":"p"}'), throwsA(isA<ProtocolException>()));
+      expect(() => Codec.decode('{"type":"hello","v":2,"pcId":"x","pub":"p","session":"s"}'), throwsA(isA<ProtocolException>()));
     });
 
     test('rejects unknown type, non-object, malformed json, missing field', () {
@@ -45,6 +45,11 @@ void main() {
       expect(() => Codec.decode('{not json'), throwsA(isA<ProtocolException>()));
       expect(() => Codec.decode('{"type":"auth_ok","id":"u1"}'), throwsA(isA<ProtocolException>()));
       expect(() => Codec.decode('{"type":"auth_denied","id":"u1","reason":"lol"}'), throwsA(isA<ProtocolException>()));
+    });
+
+    test('rejects paired/hello missing session', () {
+      expect(() => Codec.decode('{"type":"paired","pcId":"x","name":"n"}'), throwsA(isA<ProtocolException>()));
+      expect(() => Codec.decode('{"type":"hello","v":1,"pcId":"x","pub":"p"}'), throwsA(isA<ProtocolException>()));
     });
 
     test('deny reasons use wire names', () {

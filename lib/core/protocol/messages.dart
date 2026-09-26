@@ -65,29 +65,29 @@ final class PairProofMsg extends Message {
 }
 
 final class PairedMsg extends Message {
-  const PairedMsg({required this.pcId, required this.name});
-  final String pcId, name;
+  const PairedMsg({required this.pcId, required this.name, required this.session});
+  final String pcId, name, session;
   @override
   String get type => 'paired';
   @override
-  Map<String, Object?> toJson() => {'type': type, 'pcId': pcId, 'name': name};
+  Map<String, Object?> toJson() => {'type': type, 'pcId': pcId, 'name': name, 'session': session};
   @override
-  bool operator ==(Object other) => other is PairedMsg && other.pcId == pcId && other.name == name;
+  bool operator ==(Object other) => other is PairedMsg && other.pcId == pcId && other.name == name && other.session == session;
   @override
-  int get hashCode => Object.hash(pcId, name);
+  int get hashCode => Object.hash(pcId, name, session);
 }
 
 final class HelloMsg extends Message {
-  const HelloMsg({required this.pcId, required this.pub});
-  final String pcId, pub;
+  const HelloMsg({required this.pcId, required this.pub, required this.session});
+  final String pcId, pub, session;
   @override
   String get type => 'hello';
   @override
-  Map<String, Object?> toJson() => {'type': type, 'v': protocolVersion, 'pcId': pcId, 'pub': pub};
+  Map<String, Object?> toJson() => {'type': type, 'v': protocolVersion, 'pcId': pcId, 'pub': pub, 'session': session};
   @override
-  bool operator ==(Object other) => other is HelloMsg && other.pcId == pcId && other.pub == pub;
+  bool operator ==(Object other) => other is HelloMsg && other.pcId == pcId && other.pub == pub && other.session == session;
   @override
-  int get hashCode => Object.hash(pcId, pub);
+  int get hashCode => Object.hash(pcId, pub, session);
 }
 
 final class WelcomeMsg extends Message {
