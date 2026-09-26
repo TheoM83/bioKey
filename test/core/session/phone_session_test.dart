@@ -82,6 +82,20 @@ void main() {
     expect(signer.prompts.single, 'Ouvrir Mon app sur PC ?');
   });
 
+  test('onAuthShown callback fires before signer.sign is called', () async {
+    final order = <String>[];
+    final orderedSigner = _OrderTrackingSigner(order);
+    final withCallback = PhoneSession(
+      signer: orderedSigner,
+      clock: clock,
+      onAuthShown: (_) => order.add('shown'),
+    );
+    final frame = Codec.encode(const AuthMsg(id: 'u1', pcId: 'pc1', action: 'open', label: 'x', nonce: 'N', iat: 1000, exp: 1030));
+    final fx = await withCallback.onFrame(pc, frame);
+    expect(order, ['shown', 'sign']);
+    expect(fx.whereType<PhoneAuthShown>(), isNotEmpty);
+  });
+
   test('auth cancelled → denied user; failed → denied biometric_failed', () async {
     final frame = Codec.encode(const AuthMsg(id: 'u1', pcId: 'pc1', action: 'open', label: 'x', nonce: 'N', iat: 1000, exp: 1030));
     signer.cancelNext = true;
@@ -130,4 +144,18 @@ void main() {
     expect(m.pub, signer.keys.pubSpkiB64);
     expect(m.session, pc.session);
   });
+}
+
+/// A [FakeSigner] that appends 'sign' to a shared order list the instant
+/// `sign()` is called, so a test can prove `PhoneSession`'s `onAuthShown`
+/// callback — which appends its own marker — really fires first.
+class _OrderTrackingSigner extends FakeSigner {
+  _OrderTrackingSigner(this._order);
+  final List<String> _order;
+
+  @override
+  Future<String> sign({required String payload, required String prompt}) {
+    _order.add('sign');
+    return super.sign(payload: payload, prompt: prompt);
+  }
 }

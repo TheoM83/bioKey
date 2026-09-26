@@ -43,12 +43,14 @@ final class PhoneOnlineChanged extends PhoneEffect {
 }
 
 final class PhoneSession {
-  PhoneSession({required BiometricSigner signer, required Clock clock})
+  PhoneSession({required BiometricSigner signer, required Clock clock, void Function(PhoneAuthShown)? onAuthShown})
       : _signer = signer,
-        _clock = clock;
+        _clock = clock,
+        _onAuthShown = onAuthShown;
 
   final BiometricSigner _signer;
   final Clock _clock;
+  final void Function(PhoneAuthShown)? _onAuthShown;
   QrPayload? _pairingQr;
 
   static const authTtl = 30;
@@ -140,6 +142,12 @@ final class PhoneSession {
       return [PhoneSend(Codec.encode(AuthDeniedMsg(id: m.id, reason: DenyReason.timeout)))];
     }
     final shown = PhoneAuthShown(m.label, pc.name);
+    // Invoked synchronously, before `sign()` even starts: on Android the
+    // biometric prompt cannot be shown from a backgrounded activity, so
+    // the controller needs this notice *before* the (blocking) sign call
+    // begins, not after — by the time the returned effect list reaches the
+    // controller, sign() has already run to completion (or failure).
+    _onAuthShown?.call(shown);
     try {
       final sig = await _signer.sign(payload: frame, prompt: 'Ouvrir ${m.label} sur ${pc.name} ?');
       return [shown, PhoneSend(Codec.encode(AuthOkMsg(id: m.id, sig: sig)))];

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:biometric_signature/biometric_signature.dart';
 import '../../core/session/biometric_signer.dart';
 import '../../core/storage/phone_store.dart';
@@ -7,13 +8,27 @@ import '../../core/storage/phone_store.dart';
 /// never leaves secure hardware. Every [sign] call requires a fresh
 /// biometric prompt.
 final class BiometricSignatureSigner implements BiometricSigner {
-  BiometricSignatureSigner(this._store);
+  BiometricSignatureSigner(this._store, {Future<void> Function()? waitForeground}) : _waitForeground = waitForeground;
 
   final PhoneStore _store;
+  final Future<void> Function()? _waitForeground;
   final _bs = BiometricSignature();
+  Future<String>? _pendingEnsure;
 
+  /// Guards against concurrent `ensurePublicKey` calls (e.g. a pairing
+  /// flow and a reconnecting link's `hello` both starting around the same
+  /// time) racing each other into two separate `createKeys` calls.
   @override
-  Future<String> ensurePublicKey() async {
+  Future<String> ensurePublicKey() {
+    final pending = _pendingEnsure;
+    if (pending != null) return pending;
+    final future = _ensurePublicKey();
+    _pendingEnsure = future;
+    unawaited(future.whenComplete(() => _pendingEnsure = null));
+    return future;
+  }
+
+  Future<String> _ensurePublicKey() async {
     final cached = await _store.pubKey();
     if (cached != null && await _bs.biometricKeyExists(checkValidity: true)) {
       return cached;
@@ -32,6 +47,16 @@ final class BiometricSignatureSigner implements BiometricSigner {
 
   @override
   Future<String> sign({required String payload, required String prompt}) async {
+    final waitForeground = _waitForeground;
+    if (waitForeground != null) {
+      try {
+        await waitForeground();
+      } on Object {
+        // Android cannot show a BiometricPrompt from a backgrounded
+        // activity; if we never got foregrounded in time, don't even try.
+        throw BiometricFailed('application en arrière-plan');
+      }
+    }
     final result = await _bs.createSignature(
       payload: payload,
       promptMessage: prompt,

@@ -7,32 +7,40 @@ import 'package:bonsoir/bonsoir.dart';
 final class MdnsFinder {
   Future<String?> resolveHost(String pcId, {Duration timeout = const Duration(seconds: 4)}) async {
     final d = BonsoirDiscovery(type: '_biokey._tcp');
-    await d.initialize();
-    final done = Completer<String?>();
+    StreamSubscription<BonsoirDiscoveryEvent>? sub;
+    try {
+      await d.initialize();
+      final done = Completer<String?>();
 
-    final sub = d.eventStream?.listen((BonsoirDiscoveryEvent ev) async {
-      switch (ev) {
-        case BonsoirDiscoveryServiceFoundEvent(:final service):
-          await service.resolve(d.serviceResolver);
-        case BonsoirDiscoveryServiceResolvedEvent(:final service):
-          final host = service.host;
-          if (host != null && service.attributes['id'] == pcId && !done.isCompleted) {
-            done.complete(host);
-          }
-        case BonsoirDiscoveryStartedEvent():
-        case BonsoirDiscoveryServiceUpdatedEvent():
-        case BonsoirDiscoveryServiceResolveFailedEvent():
-        case BonsoirDiscoveryServiceLostEvent():
-        case BonsoirDiscoveryStoppedEvent():
-        case BonsoirDiscoveryUnknownEvent():
-          break;
-      }
-    });
+      sub = d.eventStream?.listen((BonsoirDiscoveryEvent ev) async {
+        switch (ev) {
+          case BonsoirDiscoveryServiceFoundEvent(:final service):
+            try {
+              await service.resolve(d.serviceResolver);
+            } on Object {
+              // A single service failing to resolve shouldn't take down
+              // discovery for every other service on the network.
+            }
+          case BonsoirDiscoveryServiceResolvedEvent(:final service):
+            final host = service.host;
+            if (host != null && service.attributes['id'] == pcId && !done.isCompleted) {
+              done.complete(host);
+            }
+          case BonsoirDiscoveryStartedEvent():
+          case BonsoirDiscoveryServiceUpdatedEvent():
+          case BonsoirDiscoveryServiceResolveFailedEvent():
+          case BonsoirDiscoveryServiceLostEvent():
+          case BonsoirDiscoveryStoppedEvent():
+          case BonsoirDiscoveryUnknownEvent():
+            break;
+        }
+      });
 
-    await d.start();
-    final result = await done.future.timeout(timeout, onTimeout: () => null);
-    await sub?.cancel();
-    await d.stop();
-    return result;
+      await d.start();
+      return await done.future.timeout(timeout, onTimeout: () => null);
+    } finally {
+      await sub?.cancel();
+      await d.stop();
+    }
   }
 }

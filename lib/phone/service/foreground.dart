@@ -64,17 +64,33 @@ Future<ServiceRequestResult> startForegroundService() async {
   );
 }
 
+/// The operations [PhoneController] needs from the `biokey_auth` notifier,
+/// extracted so tests can inject a fake instead of touching the real
+/// `flutter_local_notifications` platform channel.
+abstract interface class AuthNotifierApi {
+  Future<void> init();
+  Future<void> showAuthPrompt({required int id, required String label, required String pcName});
+  Future<void> cancel(int id);
+}
+
 /// The Android notification channel used to alert the user of an incoming
 /// biometric authentication request (`PhoneAuthShown`) while BioKey is
 /// backgrounded — high-priority/full-screen so it surfaces immediately,
 /// since the biometric prompt itself is already showing by the time this
-/// fires (`sign()` runs as soon as the `auth` frame arrives).
-final class AuthNotifier {
+/// fires (the phone session invokes its `onAuthShown` callback *before*
+/// calling into the biometric signer, not after).
+final class AuthNotifier implements AuthNotifierApi {
   static const _channelId = 'biokey_auth';
 
   final _plugin = FlutterLocalNotificationsPlugin();
+  bool _initialized = false;
 
+  /// Idempotent: safe to call before every [showAuthPrompt] without
+  /// re-registering the notification channel each time.
+  @override
   Future<void> init() async {
+    if (_initialized) return;
+    _initialized = true;
     const android = AndroidInitializationSettings('@mipmap/ic_launcher');
     await _plugin.initialize(settings: const InitializationSettings(android: android));
     await _plugin
@@ -89,9 +105,10 @@ final class AuthNotifier {
         );
   }
 
-  Future<void> showAuthPrompt({required String label, required String pcName}) async {
+  @override
+  Future<void> showAuthPrompt({required int id, required String label, required String pcName}) async {
     await _plugin.show(
-      id: 0,
+      id: id,
       title: 'BioKey',
       body: 'Ouvrir $label sur $pcName ?',
       notificationDetails: const NotificationDetails(
@@ -107,4 +124,7 @@ final class AuthNotifier {
       ),
     );
   }
+
+  @override
+  Future<void> cancel(int id) => _plugin.cancel(id: id);
 }
