@@ -64,6 +64,33 @@ void main() {
     await c.handleCli(['open', 'nope']);
     expect(notifier.shown.single.$2, contains('inconnue'));
   });
+
+  test('revokePhone resets phoneOnline after a PhoneOnline(true) effect', () async {
+    fakeServer.onEffect(const PhoneOnline(true));
+    expect(c.phoneOnline, isTrue);
+    await c.revokePhone();
+    expect(c.phoneOnline, isFalse);
+  });
+
+  test('handleCli([]) invokes onShowWindow', () async {
+    var shown = false;
+    final kv = InMemorySecureKv();
+    final withCallback = DesktopController(
+      store: DesktopStore(kv), apps: AppStore(kv), launcher: FakeLauncher(), verifier: const EcdsaVerifier(),
+      clock: FakeClock(1000), notifier: FakeNotifier(),
+      serverFactory: (id, s, onEffect) => FakeWsServer(onEffect),
+      mdns: null,
+      onShowWindow: () => shown = true,
+    );
+    await withCallback.init();
+    await withCallback.handleCli(<String>[]);
+    expect(shown, isTrue);
+  });
+
+  test('after dispose(), pushing a PhoneOnline(false) effect does not throw', () async {
+    c.dispose();
+    expect(() => fakeServer.onEffect(const PhoneOnline(false)), returnsNormally);
+  });
 }
 
 class FakeWsServer implements WsServerApi {

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -32,6 +33,8 @@ Future<void> runDesktop(List<String> args) async {
   final notifier = LocalNotifier();
   await notifier.setup();
 
+  SingleInstance? guard;
+
   final controller = DesktopController(
     store: DesktopStore(kv),
     apps: AppStore(kv),
@@ -40,17 +43,38 @@ Future<void> runDesktop(List<String> args) async {
     clock: const SystemClock(),
     notifier: notifier,
     mdns: MdnsAdvertiser(),
+    onShowWindow: () {
+      unawaited(windowManager.show());
+      unawaited(windowManager.focus());
+    },
+    onDispose: () => unawaited(guard?.dispose()),
   );
 
   await windowManager.ensureInitialized();
-  await SingleInstance.acquire(onArgs: (a) => controller.handleCli(a));
+
+  guard = await SingleInstance.acquire(onArgs: (a) => controller.handleCli(a));
+  if (guard == null) {
+    // Lost the bind race: another instance grabbed the port between our
+    // own `forward` above (which found nobody listening) and now. Give it
+    // one more chance to take this launch before giving up.
+    if (await SingleInstance.forward(args)) {
+      exit(0);
+    }
+    await notifier.show('BioKey', 'BioKey est déjà lancé');
+    exit(1);
+  }
+
   await controller.init();
 
   final tray = BioKeyTray(controller);
   await tray.init();
 
-  launchAtStartup.setup(appName: 'BioKey', appPath: Platform.resolvedExecutable);
-  await launchAtStartup.enable();
+  try {
+    launchAtStartup.setup(appName: 'BioKey', appPath: Platform.resolvedExecutable);
+    await launchAtStartup.enable();
+  } on Object catch (_) {
+    // Autostart is non-essential: never block startup on it.
+  }
 
   await windowManager.setPreventClose(true);
 

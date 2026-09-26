@@ -31,6 +31,8 @@ final class DesktopController extends ChangeNotifier {
     required Notifier notifier,
     WsServerApi Function(DesktopIdentity identity, DesktopSession session, void Function(DesktopEffect) onEffect)? serverFactory,
     MdnsAdvertiser? mdns,
+    void Function()? onShowWindow,
+    void Function()? onDispose,
   })  : _store = store,
         _apps = apps,
         _launcher = launcher,
@@ -39,6 +41,8 @@ final class DesktopController extends ChangeNotifier {
         _notifier = notifier,
         _serverFactory = serverFactory,
         _mdns = mdns,
+        _onShowWindow = onShowWindow,
+        _onDispose = onDispose,
         _unlock = UnlockCache(clock);
 
   final DesktopStore _store;
@@ -49,6 +53,8 @@ final class DesktopController extends ChangeNotifier {
   final Notifier _notifier;
   final WsServerApi Function(DesktopIdentity, DesktopSession, void Function(DesktopEffect))? _serverFactory;
   final MdnsAdvertiser? _mdns;
+  final void Function()? _onShowWindow;
+  final void Function()? _onDispose;
   final UnlockCache _unlock;
 
   late DesktopIdentity _identity;
@@ -59,6 +65,7 @@ final class DesktopController extends ChangeNotifier {
   PairedPhone? _phone;
   bool _online = false;
   QrPayload? _pairingQr;
+  bool _disposed = false;
   final _authToApp = <String, String>{};
 
   String get pcId => _identity.pcId;
@@ -87,41 +94,46 @@ final class DesktopController extends ChangeNotifier {
     await _mdns?.start(pcId: _identity.pcId, name: pcName, port: _server.port);
 
     _appsCache = await _apps.all();
-    notifyListeners();
+    _notify();
   }
 
   Future<void> startPairing() async {
     _session.startPairing();
     final host = await primaryLanIPv4();
+    if (host == null) {
+      await _notifier.show('BioKey', 'Aucun réseau local détecté — connectez le PC au Wi-Fi ou au câble');
+      return;
+    }
     _pairingQr = QrPayload(
       pcId: _identity.pcId,
       name: await _store.pcName(),
-      host: host ?? '',
+      host: host,
       port: _server.port,
       fingerprint: _identity.fingerprintB64Url,
       token: _session.pairingToken!,
     );
-    notifyListeners();
+    _notify();
   }
 
   Future<void> revokePhone() async {
     await _store.clearPairedPhone();
     _session.phone = null;
     _phone = null;
-    notifyListeners();
+    _online = false;
+    _notify();
   }
 
   Future<void> addApp(String target, {String? label}) async {
     final app = ProtectedApp.create(label: label ?? _labelFromTarget(target), target: target);
     await _apps.upsert(app);
     _appsCache = await _apps.all();
-    notifyListeners();
+    _notify();
   }
 
   Future<void> removeApp(String id) async {
     await _apps.remove(id);
     _appsCache = await _apps.all();
-    notifyListeners();
+    _notify();
   }
 
   Future<void> setUnlockMinutes(String id, int m) async {
@@ -129,7 +141,7 @@ final class DesktopController extends ChangeNotifier {
     if (app == null) return;
     await _apps.upsert(app.copyWith(unlockMinutes: m));
     _appsCache = await _apps.all();
-    notifyListeners();
+    _notify();
   }
 
   /// The protected launch: looks the app up in the store, launches it
@@ -156,11 +168,12 @@ final class DesktopController extends ChangeNotifier {
       case OpenApp():
         await open(cmd.id);
       case ShowWindow():
-        break;
+        _onShowWindow?.call();
     }
   }
 
   void _onEffect(DesktopEffect e) {
+    if (_disposed) return;
     switch (e) {
       case AuthResolved():
         final appId = _authToApp.remove(e.id);
@@ -170,14 +183,21 @@ final class DesktopController extends ChangeNotifier {
         _phone = e.phone;
         _pairingQr = null;
         unawaited(_notifier.show('BioKey', 'Téléphone appairé : ${e.phone.name}'));
-        notifyListeners();
+        _notify();
       case PhoneOnline():
         _online = e.online;
-        notifyListeners();
+        _notify();
       case SendFrame():
       case CloseConn():
         break;
     }
+  }
+
+  /// Notifies listeners unless this controller has already been disposed
+  /// (an in-flight async callback, e.g. from the server, can still land
+  /// after the window/tray tears the controller down on quit).
+  void _notify() {
+    if (!_disposed) notifyListeners();
   }
 
   /// Public so tests can simulate an [AuthResolved] effect arriving for a
@@ -224,8 +244,11 @@ final class DesktopController extends ChangeNotifier {
 
   @override
   void dispose() {
+    if (_disposed) return;
+    _disposed = true;
     unawaited(_server.stop());
     unawaited(_mdns?.stop());
+    _onDispose?.call();
     super.dispose();
   }
 }

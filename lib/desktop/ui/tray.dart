@@ -47,6 +47,7 @@ final class BioKeyTray with TrayListener {
       unawaited(windowManager.show());
       unawaited(windowManager.focus());
     } else if (k == 'quit') {
+      dispose();
       c.dispose();
       unawaited(windowManager.destroy());
     }

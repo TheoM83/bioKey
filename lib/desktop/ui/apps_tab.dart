@@ -75,7 +75,15 @@ class _AppRow extends StatelessWidget {
             },
           ),
           TextButton(
-            onPressed: () => createProtectedShortcut(app: app, exePath: Platform.resolvedExecutable),
+            onPressed: () async {
+              final messenger = ScaffoldMessenger.of(context);
+              try {
+                await createProtectedShortcut(app: app, exePath: Platform.resolvedExecutable);
+                messenger.showSnackBar(const SnackBar(content: Text('Raccourci créé sur le Bureau')));
+              } on Object catch (e) {
+                messenger.showSnackBar(SnackBar(content: Text(_shortcutErrorMessage(e))));
+              }
+            },
             child: const Text('Créer le raccourci'),
           ),
           IconButton(
@@ -86,4 +94,14 @@ class _AppRow extends StatelessWidget {
       ),
     );
   }
+}
+
+/// [createProtectedShortcut] already throws an `Exception` whose message
+/// reads "Création du raccourci impossible : details"; strip the
+/// `Exception: ` wrapper `Object.toString()` adds instead of re-wrapping
+/// the prefix a second time.
+String _shortcutErrorMessage(Object e) {
+  final s = e.toString();
+  const prefix = 'Exception: ';
+  return s.startsWith(prefix) ? s.substring(prefix.length) : s;
 }
