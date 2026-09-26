@@ -3,6 +3,8 @@
 
 # Release build outputs
 dist/
+/*.apk
+/*.aab
 
 # Miscellaneous
 *.class

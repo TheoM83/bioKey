@@ -1,0 +1,23 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.{dart,yaml,yml,md}]
+indent_style = space
+indent_size = 2
+
+# tool/*.ps1 files are intentionally saved as UTF-8 WITH BOM and CRLF line
+# endings (Windows PowerShell 5.1 misreads BOM-less UTF-8 as the ANSI code
+# page, garbling accented French text). Do not reformat them; this block
+# only documents the exception, it does not rewrite the file.
+[tool/*.ps1]
+end_of_line = crlf
+charset = utf-8-bom
+indent_style = unset
+indent_size = unset

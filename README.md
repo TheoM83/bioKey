@@ -1,13 +1,32 @@
 # BioKey
 
-## Ce que fait BioKey
+Le téléphone comme clé biométrique du PC · Your phone's fingerprint as your PC's biometric key.
+
+[![CI](https://github.com/TheoM83/bioKey/actions/workflows/ci.yml/badge.svg)](https://github.com/TheoM83/bioKey/actions/workflows/ci.yml)
+![Flutter](https://img.shields.io/badge/Flutter-3.35-02569B?logo=flutter&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Platforms](https://img.shields.io/badge/platform-Android%20%C2%B7%20Windows-lightgrey)
+
+---
+
+## Français
+
+### Ce que fait BioKey
 
 BioKey transforme le téléphone en clé biométrique pour le PC. Le téléphone
-signe des demandes d'authentification avec l'empreinte digitale ou Face ID.
-Le PC vérifie la signature et déverrouille ou lance les applications
-protégées.
+signe des demandes d'authentification avec l'empreinte digitale. Le PC
+vérifie la signature et lance les applications protégées. Pas de serveur,
+pas de cloud, pas de compte : tout se passe sur le réseau local.
 
-## Installer
+```
+ ┌──────────────┐   wss://  TLS épinglé (QR)   ┌──────────────┐
+ │  Téléphone   │ ───────────────────────────► │      PC      │
+ │  (Android)   │        signature seule        │  (Windows)   │
+ │  clé biométr.│ ◄─────────────────────────── │  vérif. + tray│
+ └──────────────┘        même LAN               └──────────────┘
+```
+
+### Installer
 
 1. **Sur le PC** : lancer `BioKey-Setup-x.y.z.exe`, suivant, terminé — BioKey
    apparaît dans la barre système. Au premier lancement, le pare-feu Windows
@@ -22,31 +41,145 @@ protégées.
 3. **Appairer** : icône BioKey → Ouvrir BioKey… → onglet Téléphone →
    Afficher le QR → scanner depuis le téléphone → poser le doigt.
 
-## Protéger une application
+### Protéger une application
 
-Icône BioKey → Ouvrir BioKey… → onglet Apps → Ajouter → « Créer le raccourci ».
+Icône BioKey → Ouvrir BioKey… → onglet Apps → Ajouter → « Créer le
+raccourci ».
 
-## Sécurité en une phrase
+### Sécurité en une phrase
 
-Chaque appareil garde sa clé privée sur lui et les demandes sont approuvées
-par signature ; le seul secret échangé est un secret de session, transmis
-une seule fois à l'appairage, dans la connexion TLS épinglée par le QR.
+L'empreinte ne quitte jamais le téléphone ; seule une signature ECDSA
+voyage ; la connexion est un `wss://` dont le PC épingle le certificat via
+le QR ; la reconnexion utilise un secret de session remis une seule fois à
+l'appairage. Détails et modèle de menace : [SECURITY.md](SECURITY.md).
 
-## Construire soi-même
+### Construire soi-même
+
+Prérequis : Flutter 3.35, Android SDK 35, Java 17, [Inno Setup](https://jrsoftware.org/isinfo.php),
+et le Mode développeur Windows (Paramètres → Système → Espace développeurs)
+pour compiler la version Windows.
 
 ```powershell
-tool/build_release.ps1
+pwsh -File tool/build_release.ps1
 ```
 
-Utilisez `pwsh -File tool/build_release.ps1` si PowerShell 7 est installé, sinon `powershell -File tool/build_release.ps1`.
-
-Prérequis : Flutter, Android SDK, Inno Setup, et le Mode développeur Windows
-(Paramètres → Système → Espace développeurs) pour compiler la version
-Windows.
+Options : `-SkipWindows` ou `-SkipAndroid` pour ne construire qu'une moitié.
+Utilisez `powershell -File tool/build_release.ps1` si PowerShell 7 (`pwsh`)
+n'est pas installé.
 
 L'APK « release » produit est signé avec la clé de **débogage** de la
-machine qui l'a compilé : il s'installe, mais une mise à jour compilée sur
-une autre machine sera refusée (signature différente — il faudrait
-désinstaller, donc réappairer). Pour distribuer des mises à jour, créez un
-keystore (`keytool -genkey …`) et configurez `signingConfigs.release` dans
-`android/app/build.gradle.kts`.
+machine qui l'a compilé (pas encore de keystore de release) : il s'installe,
+mais une mise à jour compilée sur une autre machine sera refusée (signature
+différente — il faudrait désinstaller, donc réappairer).
+
+### Feuille de route
+
+- **J1 — MVP (fait)** : appairage QR, approbation biométrique, apps
+  protégées, barre système, installeur, service premier plan, TLS épinglé
+  + secret de session.
+- **J2 — Confort** : historique des demandes, raccourci clavier global,
+  i18n anglais.
+- **J3 — Multi-OS** : macOS, Linux, iOS, repli Bluetooth LE.
+
+Détails : [CAHIER_DES_CHARGES.md](CAHIER_DES_CHARGES.md) (spécification,
+FR) et [docs/superpowers/plans/](docs/superpowers/plans/) (plan
+d'implémentation).
+
+### Contribuer
+
+```
+flutter analyze && flutter test
+```
+
+Commits au format [Conventional Commits](https://www.conventionalcommits.org/).
+Pour un changement de protocole (`lib/core/`), ouvrez une issue avant la PR.
+
+### Licence
+
+[MIT](LICENSE)
+
+---
+
+## English
+
+### What it does
+
+BioKey turns the phone into a biometric key for the PC. The phone signs
+authentication requests with a fingerprint. The PC verifies the signature
+and launches the protected app. No server, no cloud, no account — everything
+stays on the local network.
+
+```
+ ┌──────────────┐   wss://  pinned TLS (QR)    ┌──────────────┐
+ │    Phone     │ ───────────────────────────► │      PC      │
+ │  (Android)   │        signature only         │  (Windows)   │
+ │ biometric key│ ◄─────────────────────────── │ verify + tray │
+ └──────────────┘        same LAN               └──────────────┘
+```
+
+### Install
+
+1. **On the PC**: run `BioKey-Setup-x.y.z.exe`, Next, Finish — BioKey
+   appears in the system tray. On first launch Windows Defender Firewall
+   will ask to allow BioKey: check **Private networks**, and make sure your
+   Wi-Fi is set to a **private** network (Settings → Network & Internet →
+   Wi-Fi → network properties), otherwise the phone won't be able to reach
+   the PC.
+2. **On the phone**: open `BioKey-x.y.z.apk` from the phone's file manager
+   (allow "Install unknown apps" if prompted), open BioKey, accept
+   notifications and the battery-optimization exclusion.
+3. **Pair**: BioKey tray icon → Open BioKey… → Phone tab → Show QR → scan
+   from the phone → place your finger.
+
+### Protect an app
+
+Tray icon → Open BioKey… → Apps tab → Add → "Create shortcut".
+
+### Security in one sentence
+
+The fingerprint never leaves the phone; only an ECDSA signature travels;
+the connection is `wss://` with the PC's certificate pinned via the QR
+code; reconnection uses a session secret issued once at pairing time.
+Details and threat model: [SECURITY.md](SECURITY.md).
+
+### Build it yourself
+
+Prerequisites: Flutter 3.35, Android SDK 35, Java 17,
+[Inno Setup](https://jrsoftware.org/isinfo.php), and Windows Developer Mode
+(Settings → System → For developers) to build the Windows target.
+
+```powershell
+pwsh -File tool/build_release.ps1
+```
+
+Flags: `-SkipWindows` or `-SkipAndroid` to build only one half. Use
+`powershell -File tool/build_release.ps1` if PowerShell 7 (`pwsh`) isn't
+installed.
+
+The produced release APK is signed with the **debug** key of the build
+machine (no release keystore yet): it installs fine, but an update built on
+another machine will be rejected (different signature — you'd need to
+uninstall and re-pair).
+
+### Roadmap
+
+- **J1 — MVP (done)**: QR pairing, biometric approval, protected apps,
+  system tray, installer, foreground service, pinned TLS + session secret.
+- **J2 — Polish**: request history, global hotkey, English i18n.
+- **J3 — Multi-OS**: macOS, Linux, iOS, Bluetooth LE fallback.
+
+More: [CAHIER_DES_CHARGES.md](CAHIER_DES_CHARGES.md) (spec, French) and
+[docs/superpowers/plans/](docs/superpowers/plans/) (implementation plan).
+
+### Contributing
+
+```
+flutter analyze && flutter test
+```
+
+Use [Conventional Commits](https://www.conventionalcommits.org/). For a
+protocol change (`lib/core/`), open an issue before sending a PR.
+
+### License
+
+[MIT](LICENSE)
