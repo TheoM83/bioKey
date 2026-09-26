@@ -1,8 +1,13 @@
 import 'package:flutter/material.dart';
 import 'core/role.dart';
+import 'desktop/desktop_app.dart';
 
-void main(List<String> args) {
+Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (detectRole() == Role.desktop) {
+    await runDesktop(args);
+    return;
+  }
   runApp(BioKeyRoot(role: detectRole(), args: args));
 }
 

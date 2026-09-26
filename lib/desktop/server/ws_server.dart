@@ -5,11 +5,21 @@ import '../../core/protocol/codec.dart';
 import '../../core/protocol/messages.dart';
 import '../../core/session/desktop_session.dart';
 
+/// The operations [DesktopController] needs from a WebSocket server,
+/// extracted so tests can inject a [WsServerApi] fake instead of binding a
+/// real TLS socket.
+abstract interface class WsServerApi {
+  Future<void> start({String address = '0.0.0.0', required int port});
+  int get port;
+  Future<void> stop();
+  void apply(List<DesktopEffect> fx);
+}
+
 /// Pinned-TLS WebSocket server: accepts connections from the phone,
 /// feeds incoming frames into the pure [DesktopSession] state machine,
 /// and executes the [DesktopEffect]s it returns (send/close), plus a
 /// periodic tick and keep-alive ping on the paired connection.
-final class WsServer {
+final class WsServer implements WsServerApi {
   WsServer({required this.identity, required this.session, required this.onEffect});
 
   final DesktopIdentity identity;
@@ -22,8 +32,10 @@ final class WsServer {
   Timer? _tick;
   Timer? _ping;
 
+  @override
   int get port => _http?.port ?? 0;
 
+  @override
   Future<void> start({String address = '0.0.0.0', required int port}) async {
     _http = await HttpServer.bindSecure(address, port, identity.securityContext(), shared: false);
     _http!.listen((req) => unawaited(_onRequest(req)), onError: (Object _) {});
@@ -67,6 +79,7 @@ final class WsServer {
   /// Executes every [SendFrame]/[CloseConn] effect against the live
   /// connections, then forwards every effect (including the others) to
   /// [onEffect] so the caller can react (e.g. update UI state).
+  @override
   void apply(List<DesktopEffect> fx) {
     for (final e in fx) {
       switch (e) {
@@ -83,6 +96,7 @@ final class WsServer {
     }
   }
 
+  @override
   Future<void> stop() async {
     _tick?.cancel();
     _ping?.cancel();
