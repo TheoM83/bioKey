@@ -15,10 +15,15 @@ final class SingleInstance {
     }
     s.listen((sock) {
       sock.cast<List<int>>().transform(utf8.decoder).transform(const LineSplitter()).listen((line) {
-        final l = (jsonDecode(line) as List<Object?>).cast<String>();
+        final List<String> l;
+        try {
+          l = (jsonDecode(line) as List<Object?>).cast<String>().toList();
+        } on Object {
+          return;
+        }
         onArgs(l);
-      }, onDone: sock.close);
-    });
+      }, onDone: sock.close, onError: (Object _) {});
+    }, onError: (Object _) {});
     return SingleInstance._(s);
   }
 

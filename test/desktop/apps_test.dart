@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:biokey/core/session/clock.dart';
 import 'package:biokey/core/storage/secure_kv.dart';
@@ -50,6 +52,23 @@ void main() {
     expect(await SingleInstance.forward(['open', 'id1']), isTrue);
     await Future<void>.delayed(const Duration(milliseconds: 200));
     expect(got.single, ['open', 'id1']);
+    await first!.dispose();
+  });
+
+  test('SingleInstance: malformed lines do not kill the listener', () async {
+    final got = <List<String>>[];
+    final first = await SingleInstance.acquire(onArgs: got.add);
+    expect(first, isNotNull);
+
+    final sock = await Socket.connect(InternetAddress.loopbackIPv4, SingleInstance.port);
+    sock.write('not json\n');
+    sock.write('[1,2]\n');
+    await sock.flush();
+    await sock.close();
+
+    expect(await SingleInstance.forward(['open', 'ok']), isTrue);
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(got.single, ['open', 'ok']);
     await first!.dispose();
   });
 }

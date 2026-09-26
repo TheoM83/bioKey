@@ -18,7 +18,7 @@ final class WindowsLauncher implements AppLauncher {
   @override
   Future<void> launch(ProtectedApp app) async {
     final t = app.target;
-    if (t.startsWith('http://') || t.startsWith('https://') || t.contains('://')) {
+    if (t.contains('://')) {
       if (!await launchUrl(Uri.parse(t))) throw LaunchFailed('Impossible d’ouvrir $t');
       return;
     }
