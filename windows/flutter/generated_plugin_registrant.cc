@@ -7,7 +7,6 @@
 #include "generated_plugin_registrant.h"
 
 #include <biometric_signature/biometric_signature_plugin.h>
-#include <bonsoir_windows/bonsoir_windows_plugin_c_api.h>
 #include <desktop_drop/desktop_drop_plugin.h>
 #include <flutter_secure_storage_windows/flutter_secure_storage_windows_plugin.h>
 #include <local_notifier/local_notifier_plugin.h>
@@ -19,8 +18,6 @@
 void RegisterPlugins(flutter::PluginRegistry* registry) {
   BiometricSignaturePluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("BiometricSignaturePlugin"));
-  BonsoirWindowsPluginCApiRegisterWithRegistrar(
-      registry->GetRegistrarForPlugin("BonsoirWindowsPluginCApi"));
   DesktopDropPluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("DesktopDropPlugin"));
   FlutterSecureStorageWindowsPluginRegisterWithRegistrar(

@@ -9,17 +9,13 @@ import '../../core/session/desktop_session.dart';
 
 /// The operations [DesktopController] needs from a link server, extracted
 /// so tests can inject a [LinkServerApi] fake instead of binding a real TLS
-/// socket. (Rename of `WsServerApi`, kept as a typedef below for callers not
-/// yet updated.)
+/// socket.
 abstract interface class LinkServerApi {
   Future<void> start({String address = '0.0.0.0', required int port});
   int get port;
   Future<void> stop();
   void apply(List<DesktopEffect> fx);
 }
-
-/// Back-compat name; see [LinkServerApi].
-typedef WsServerApi = LinkServerApi;
 
 /// Pinned-TLS raw-socket server: accepts connections from the phone over
 /// length-prefixed JSON frames (`framing.dart`), feeds incoming frames into
@@ -36,9 +32,8 @@ typedef WsServerApi = LinkServerApi;
 /// once it has been sent a `pair_challenge`, since the user is then looking
 /// at a fingerprint prompt — and, once authenticated, a socket that has sent
 /// no frame at all for [livenessTimeout] is closed too. That liveness rule
-/// replaces transport-level (e.g. WebSocket) ping/pong: the phone sends a
-/// protocol `ping` every 30 s when otherwise idle, which is enough to keep
-/// resetting it.
+/// replaces a transport-level ping/pong: the phone sends a protocol `ping`
+/// every 30 s when otherwise idle, which is enough to keep resetting it.
 final class TlsServer implements LinkServerApi {
   TlsServer({
     required this.identity,

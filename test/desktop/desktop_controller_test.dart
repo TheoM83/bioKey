@@ -18,14 +18,14 @@ void main() {
   late FakeLauncher launcher;
   late FakeNotifier notifier;
   late DesktopSession session;
-  late FakeWsServer fakeServer;
+  late FakeLinkServer fakeServer;
   late FakeClock clock;
   final keys = TestKeys();
 
   DesktopController build(SecureKv kv, {Duration phoneWait = const Duration(seconds: 5), void Function()? onShowWindow}) => DesktopController(
         store: DesktopStore(kv), apps: AppStore(kv), launcher: launcher, verifier: const EcdsaVerifier(),
         clock: clock, notifier: notifier,
-        serverFactory: (id, s, onEffect) { session = s; return fakeServer = FakeWsServer(onEffect); },
+        serverFactory: (id, s, onEffect) { session = s; return fakeServer = FakeLinkServer(onEffect); },
         discovery: null,
         phoneWait: phoneWait,
         onShowWindow: onShowWindow,
@@ -238,8 +238,8 @@ void main() {
   });
 }
 
-class FakeWsServer implements WsServerApi {
-  FakeWsServer(this.onEffect);
+class FakeLinkServer implements LinkServerApi {
+  FakeLinkServer(this.onEffect);
   final void Function(DesktopEffect) onEffect;
   final applied = <DesktopEffect>[];
   @override

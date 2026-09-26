@@ -4,7 +4,6 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   biometric_signature
-  bonsoir_windows
   desktop_drop
   flutter_secure_storage_windows
   local_notifier

@@ -17,7 +17,7 @@ import 'server/discovery_responder.dart';
 import 'server/lan.dart';
 import 'server/tls_server.dart';
 
-/// Wires the pure [DesktopSession] state machine to the [WsServerApi],
+/// Wires the pure [DesktopSession] state machine to the [LinkServerApi],
 /// [AppStore], [AppLauncher] and [Notifier], and exposes the desktop role's
 /// state (paired phone, protected apps, pairing QR) to the tray/window UI
 /// as a [ChangeNotifier].
@@ -29,7 +29,7 @@ final class DesktopController extends ChangeNotifier {
     required Verifier verifier,
     required Clock clock,
     required Notifier notifier,
-    WsServerApi Function(DesktopIdentity identity, DesktopSession session, void Function(DesktopEffect) onEffect)? serverFactory,
+    LinkServerApi Function(DesktopIdentity identity, DesktopSession session, void Function(DesktopEffect) onEffect)? serverFactory,
     DiscoveryResponder? discovery,
     void Function()? onShowWindow,
     void Function()? onDispose,
@@ -55,7 +55,7 @@ final class DesktopController extends ChangeNotifier {
   final Verifier _verifier;
   final Clock _clock;
   final Notifier _notifier;
-  final WsServerApi Function(DesktopIdentity, DesktopSession, void Function(DesktopEffect))? _serverFactory;
+  final LinkServerApi Function(DesktopIdentity, DesktopSession, void Function(DesktopEffect))? _serverFactory;
   final DiscoveryResponder? _discovery;
   final void Function()? _onShowWindow;
   final void Function()? _onDispose;
@@ -73,7 +73,7 @@ final class DesktopController extends ChangeNotifier {
 
   late DesktopIdentity _identity;
   late DesktopSession _session;
-  late WsServerApi _server;
+  late LinkServerApi _server;
 
   List<ProtectedApp> _appsCache = <ProtectedApp>[];
   PairedPhone? _phone;

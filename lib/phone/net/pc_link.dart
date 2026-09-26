@@ -36,8 +36,7 @@ abstract interface class PcLinkApi {
 /// disconnect/failure. Emits [PhoneOnlineChanged] itself (the session never
 /// does) so callers can track connectivity without polling [online].
 ///
-/// Transport liveness (replaces transport-level ping/pong, e.g. a
-/// WebSocket's): a protocol
+/// Transport liveness (replaces a transport-level ping/pong): a protocol
 /// `ping` is sent every [pingInterval] the connection has otherwise been
 /// idle, and the connection is closed if no frame at all (in either
 /// direction is received) for [livenessTimeout] — mirrors the equivalent
