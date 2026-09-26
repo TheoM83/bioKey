@@ -166,13 +166,16 @@ final class PcLink implements PcLinkApi {
         _ws = ws;
         _apply(await _session.hello(pc), ws, gen);
         if (_stale(gen)) return;
-        await for (final data in ws) {
+        // The socket is read continuously — never paused while a frame is
+        // being handled — so WebSocket-level pings keep being answered
+        // during a (possibly long) biometric prompt; frames themselves are
+        // still handled strictly in order through [chain].
+        var chain = Future<void>.value();
+        final socket = ws;
+        await for (final data in socket) {
           if (_stale(gen)) break;
           if (data is! String) break;
-          final fx = await _session.onFrame(pc, data);
-          if (_isWelcome(data)) _markOnline(host, gen);
-          _apply(fx, ws, gen);
-          if (_stale(gen)) break;
+          chain = chain.then((_) => _handle(data, socket, host, gen));
         }
         // That connect attempt is now settled (success or failure): the
         // *next* one alternates to the other candidate host, so a
@@ -206,6 +209,17 @@ final class PcLink implements PcLinkApi {
       await _delayOrWake(_backoff(_attempt));
       if (_stale(gen)) return; // woken by stop(): don't touch _attempt.
       _attempt++;
+    }
+  }
+
+  Future<void> _handle(String data, WebSocket ws, String host, int gen) async {
+    if (_stale(gen)) return;
+    try {
+      final fx = await _session.onFrame(pc, data);
+      if (_isWelcome(data)) _markOnline(host, gen);
+      _apply(fx, ws, gen);
+    } on Object {
+      // A frame that blows up must not stall the frames queued behind it.
     }
   }
 
@@ -252,7 +266,11 @@ final class PcLink implements PcLinkApi {
     for (final e in fx) {
       switch (e) {
         case PhoneSend():
-          ws.add(e.frame);
+          try {
+            ws.add(e.frame);
+          } on Object {
+            // Socket already closed underneath us: the reconnect loop owns it.
+          }
         case PhoneClose():
           unawaited(ws.close());
         default:
@@ -271,11 +289,18 @@ final class PcLink implements PcLinkApi {
   /// an un-awaited `async` listener callback), and the socket is always
   /// closed — on success, on a refused/cancelled pairing, if
   /// [PhoneSession.beginPairing] throws, or on a stream error.
+  ///
+  /// If the QR's host can't be reached (the PC advertised the wrong
+  /// interface, e.g. a virtual switch), the PC is looked up by id via
+  /// [resolveHost] (mDNS) and the connection retried once there — still
+  /// pinned to the QR's certificate fingerprint. The returned [PairedPc]
+  /// records the host that actually worked.
   static Future<PairedPc> pair({
     required QrPayload qr,
     required PhoneSession session,
     required void Function(PhoneEffect) onEffect,
     Connect? connect,
+    Future<String?> Function(String pcId)? resolveHost,
   }) async {
     WebSocket? ws;
     var cancelled = false;
@@ -284,11 +309,15 @@ final class PcLink implements PcLinkApi {
       session: session,
       onEffect: onEffect,
       connect: connect,
+      resolveHost: resolveHost,
       bindSocket: (w) => ws = w,
       isCancelled: () => cancelled,
     );
     try {
       return await attempt.timeout(const Duration(seconds: 60));
+    } on Object {
+      session.cancelPairing();
+      rethrow;
     } finally {
       // Covers the timeout path: `_pair`'s own try/finally already closes
       // the socket on every path it controls, so this is a best-effort
@@ -316,14 +345,31 @@ final class PcLink implements PcLinkApi {
     required void Function(WebSocket) bindSocket,
     required bool Function() isCancelled,
     Connect? connect,
+    Future<String?> Function(String pcId)? resolveHost,
   }) async {
-    final ws = await (connect ?? _defaultConnect)(qr.host, qr.port, qr.fingerprint);
+    final doConnect = connect ?? _defaultConnect;
+    var host = qr.host;
+    WebSocket ws;
+    try {
+      ws = await doConnect(host, qr.port, qr.fingerprint);
+    } on Object {
+      final resolved = (resolveHost == null || isCancelled()) ? null : await resolveHost(qr.pcId).catchError((Object _) => null);
+      if (resolved == null || resolved == qr.host || isCancelled()) rethrow;
+      host = resolved;
+      ws = await doConnect(host, qr.port, qr.fingerprint);
+    }
     bindSocket(ws);
     if (isCancelled()) {
       await ws.close();
       throw StateError('appairage: délai dépassé pendant la connexion');
     }
-    final queue = StreamQueue<Object?>(ws);
+    // Buffer through a controller so the socket itself is never paused
+    // while we wait on the fingerprint prompt (a StreamQueue pauses its
+    // source between requests), which would stop WebSocket pings from
+    // being answered and let the PC drop us mid-pairing.
+    final inbox = StreamController<Object?>();
+    final sub = ws.listen(inbox.add, onError: inbox.addError, onDone: () => unawaited(inbox.close()));
+    final queue = StreamQueue<Object?>(inbox.stream);
     var closed = false;
     Future<void> closeWs() async {
       if (closed) return;
@@ -335,7 +381,7 @@ final class PcLink implements PcLinkApi {
       // Only `tmp.name` is read by the session before `paired` arrives (for
       // the biometric prompt); the real session secret is not known until
       // then.
-      final tmp = PairedPc(pcId: qr.pcId, name: qr.name, host: qr.host, port: qr.port, fingerprint: qr.fingerprint, session: '');
+      final tmp = PairedPc(pcId: qr.pcId, name: qr.name, host: host, port: qr.port, fingerprint: qr.fingerprint, session: '');
 
       for (final e in await session.beginPairing(qr)) {
         if (e is PhoneSend) ws.add(e.frame);
@@ -356,7 +402,9 @@ final class PcLink implements PcLinkApi {
               await closeWs();
               throw StateError('appairage refusé');
             case PhonePairedWith():
-              paired = e.pc;
+              paired = host == e.pc.host
+                  ? e.pc
+                  : PairedPc(pcId: e.pc.pcId, name: e.pc.name, host: host, port: e.pc.port, fingerprint: e.pc.fingerprint, session: e.pc.session);
             default:
               onEffect(e);
           }
@@ -381,6 +429,8 @@ final class PcLink implements PcLinkApi {
       await closeWs();
       final cancelled = queue.cancel(immediate: true);
       if (cancelled != null) unawaited(cancelled.catchError((_) {}));
+      unawaited(sub.cancel());
+      if (!inbox.isClosed) unawaited(inbox.close());
     }
   }
 }

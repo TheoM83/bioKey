@@ -152,6 +152,67 @@ void main() {
     await link.stop();
   });
 
+  test('pairing retries once on the mDNS-resolved host when the QR host is unreachable', () async {
+    ds.startPairing();
+    final qr = QrPayload(pcId: id.pcId, name: 'PC', host: 'unreachable.invalid', port: server.port, fingerprint: id.fingerprintB64Url, token: ds.pairingToken!);
+    final tried = <String>[];
+    Future<WebSocket> connect(String h, int p, String fp) {
+      tried.add(h);
+      if (h == 'unreachable.invalid') return Future<WebSocket>.error(const SocketException('unreachable'));
+      return connectPinned(host: h, port: p, fingerprint: fp);
+    }
+
+    final resolvedFor = <String>[];
+    final paired = await PcLink.pair(
+      qr: qr,
+      session: PhoneSession(signer: FakeSigner(), clock: const SystemClock()),
+      onEffect: (_) {},
+      connect: connect,
+      resolveHost: (pcId) async {
+        resolvedFor.add(pcId);
+        return '127.0.0.1';
+      },
+    ).timeout(const Duration(seconds: 5));
+
+    expect(resolvedFor, [id.pcId]);
+    expect(tried, ['unreachable.invalid', '127.0.0.1']);
+    expect(paired.host, '127.0.0.1', reason: 'the host that actually worked is the one remembered');
+    expect(paired.fingerprint, id.fingerprintB64Url);
+  });
+
+  test('pairing fails when the QR host is unreachable and mDNS finds nothing', () async {
+    ds.startPairing();
+    final qr = QrPayload(pcId: id.pcId, name: 'PC', host: 'unreachable.invalid', port: server.port, fingerprint: id.fingerprintB64Url, token: ds.pairingToken!);
+    Future<WebSocket> connect(String h, int p, String fp) => Future<WebSocket>.error(const SocketException('unreachable'));
+    await expectLater(
+      PcLink.pair(qr: qr, session: PhoneSession(signer: FakeSigner(), clock: const SystemClock()), onEffect: (_) {}, connect: connect, resolveHost: (_) async => null),
+      throwsA(isA<SocketException>()),
+    );
+  });
+
+  test('WebSocket pings keep being answered while a slow fingerprint prompt is up', () async {
+    final signer = _SlowSigner(const Duration(milliseconds: 1500));
+    final ps = PhoneSession(signer: signer, clock: const SystemClock());
+    ds.startPairing();
+    final qr = QrPayload(pcId: id.pcId, name: 'PC', host: '127.0.0.1', port: server.port, fingerprint: id.fingerprintB64Url, token: ds.pairingToken!);
+    final paired = await PcLink.pair(qr: qr, session: ps, onEffect: (_) {}).timeout(const Duration(seconds: 10));
+
+    final link = PcLink(pc: paired, session: ps, onEffect: (_) {});
+    await link.start();
+    await _until(() => ds.phoneOnline);
+    // A ping interval far shorter than the prompt: a paused reader would
+    // miss the pongs and dart:io would drop the connection.
+    for (final ws in server.connections) {
+      ws.pingInterval = const Duration(milliseconds: 200);
+    }
+
+    final (authId, fx) = ds.requestAuth(label: 'Mon app');
+    server.apply(fx);
+    await _until(() => desktopFx.whereType<AuthResolved>().any((r) => r.id == authId), timeout: const Duration(seconds: 10));
+    expect(desktopFx.whereType<AuthResolved>().single.outcome, AuthOutcome.approved);
+    await link.stop();
+  });
+
   test('stop() called during a long backoff returns quickly instead of blocking for it', () async {
     final signer = FakeSigner();
     final ps = PhoneSession(signer: signer, clock: const SystemClock());
@@ -182,5 +243,18 @@ Future<void> _until(bool Function() p, {Duration timeout = const Duration(second
   while (!p()) {
     if (DateTime.now().isAfter(end)) fail('timeout waiting for condition');
     await Future<void>.delayed(const Duration(milliseconds: 50));
+  }
+}
+
+/// A [FakeSigner] whose `sign` takes [delay], like a user taking their time
+/// on the fingerprint prompt.
+class _SlowSigner extends FakeSigner {
+  _SlowSigner(this.delay);
+  final Duration delay;
+
+  @override
+  Future<String> sign({required String payload, required String prompt}) async {
+    await Future<void>.delayed(delay);
+    return super.sign(payload: payload, prompt: prompt);
   }
 }
