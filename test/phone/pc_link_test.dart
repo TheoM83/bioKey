@@ -95,6 +95,86 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 500));
     expect(ds.phoneOnline, isFalse, reason: 'no socket from a stopped generation was ever used to say hello');
   });
+
+  test('a bogus resolved host does not permanently strand the link off the stored (working) host', () async {
+    final signer = FakeSigner();
+    final ps = PhoneSession(signer: signer, clock: const SystemClock());
+    ds.startPairing();
+    final qr = QrPayload(pcId: id.pcId, name: 'PC', host: '127.0.0.1', port: server.port, fingerprint: id.fingerprintB64Url, token: ds.pairingToken!);
+    final paired = await PcLink.pair(qr: qr, session: ps, onEffect: (_) {}).timeout(const Duration(seconds: 5));
+
+    // A fake "bogus" host that fails instantly (a real TCP connect to an
+    // unreachable address can take seconds to time out, which would make
+    // this test slow/flaky) — everything else still goes through the real
+    // connectPinned, so the stored (real) host genuinely round-trips.
+    const bogusHost = 'bogus.invalid';
+    Future<WebSocket> fastFailingConnect(String h, int p, String fp) {
+      if (h == bogusHost) return Future<WebSocket>.error(const SocketException('refused'));
+      return connectPinned(host: h, port: p, fingerprint: fp);
+    }
+
+    final resolvedHosts = <String?>[];
+    Future<String?> flakyResolve(String pcId) async {
+      final result = resolvedHosts.isEmpty ? bogusHost : null;
+      resolvedHosts.add(result);
+      return result;
+    }
+
+    final phoneFx = <PhoneEffect>[];
+    final link = PcLink(
+      pc: paired,
+      session: ps,
+      onEffect: phoneFx.add,
+      connect: fastFailingConnect,
+      resolveHost: flakyResolve,
+      backoff: (_) => const Duration(milliseconds: 50),
+    );
+    await link.start();
+    await _until(() => ds.phoneOnline);
+
+    // Take the real server down so the link is forced to reconnect and
+    // consult resolveHost along the way.
+    final port = server.port;
+    await server.stop();
+    await _until(() => !link.online);
+
+    // Let it burn through: the stored host failing, the bogus resolved
+    // host failing, and resolveHost reporting "unknown" — all before the
+    // stored host is reachable again.
+    await _until(() => resolvedHosts.length >= 2, timeout: const Duration(seconds: 5));
+
+    server = WsServer(identity: id, session: ds, onEffect: desktopFx.add);
+    await server.start(address: '127.0.0.1', port: port);
+    await _until(() => ds.phoneOnline, timeout: const Duration(seconds: 10));
+
+    expect(resolvedHosts.first, bogusHost, reason: 'sanity: the bogus host really was offered');
+    expect(link.pc.host, '127.0.0.1', reason: 'never got stuck persisting/re-trying only the bogus host');
+    await link.stop();
+  });
+
+  test('stop() called during a long backoff returns quickly instead of blocking for it', () async {
+    final signer = FakeSigner();
+    final ps = PhoneSession(signer: signer, clock: const SystemClock());
+    ds.startPairing();
+    final qr = QrPayload(pcId: id.pcId, name: 'PC', host: '127.0.0.1', port: server.port, fingerprint: id.fingerprintB64Url, token: ds.pairingToken!);
+    final paired = await PcLink.pair(qr: qr, session: ps, onEffect: (_) {}).timeout(const Duration(seconds: 5));
+
+    // Fails instantly every time, so the loop reliably reaches its backoff
+    // sleep — with every backoff forced to 30s — almost immediately,
+    // without depending on real (slow/OS-specific) TCP-refusal timing.
+    Future<WebSocket> alwaysFailConnect(String h, int p, String fp) => Future<WebSocket>.error(const SocketException('refused'));
+    final link = PcLink(pc: paired, session: ps, onEffect: (_) {}, connect: alwaysFailConnect, backoff: (_) => const Duration(seconds: 30));
+    await link.start();
+    // Let the failing connect attempt run its course so the loop is
+    // actually sitting in the 30s backoff sleep by the time we stop it.
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final sw = Stopwatch()..start();
+    await link.stop().timeout(const Duration(milliseconds: 1500));
+    sw.stop();
+
+    expect(sw.elapsedMilliseconds, lessThan(500), reason: 'stop() must wake the backoff sleep, not sit through it');
+  });
 }
 
 Future<void> _until(bool Function() p, {Duration timeout = const Duration(seconds: 5)}) async {

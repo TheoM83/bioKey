@@ -73,11 +73,25 @@ final class PcLink implements PcLinkApi {
   int _gen = 0;
   Future<void>? _loopFuture;
 
+  /// Completed by [stop] to interrupt whichever of the backoff sleep or a
+  /// `resolveHost` lookup the loop is currently waiting on, so `stop()`
+  /// doesn't have to sit through a long (up to 30s) backoff — see
+  /// [_delayOrWake]/[_resolveOrWake].
+  Completer<void>? _wakeCompleter;
+
   /// An mDNS-resolved host awaiting confirmation: connect attempts prefer
   /// it over [pc]'s stored host, but it only overwrites [pc] (and gets
   /// persisted via a [PhonePairedWith] effect) once a `welcome` actually
   /// arrives on it — resolving a host is not proof it's reachable.
+  ///
+  /// Cleared (not just left stale) whenever `resolveHost` returns `null`
+  /// or the already-stored host, so one bad/transient mDNS answer can't
+  /// strand the link on it forever; while it *is* set, connect attempts
+  /// alternate between it and [pc]'s stored host (see [_preferPending]) so
+  /// a resolved-but-wrong host doesn't crowd out retrying the one that's
+  /// known to have worked before.
   String? _pendingHost;
+  bool _preferPending = true;
 
   @override
   Future<void> start() async {
@@ -92,6 +106,7 @@ final class PcLink implements PcLinkApi {
   @override
   Future<void> stop() async {
     _running = false;
+    _wakeCompleter?.complete();
     await _ws?.close();
     final future = _loopFuture;
     if (future != null) {
@@ -99,30 +114,73 @@ final class PcLink implements PcLinkApi {
     }
     _ws = null;
     _loopFuture = null;
+    // The loop's own offline transition is generation-gated (see
+    // _markOffline) so a stale generation can't touch shared state after
+    // this bound expires; stop() is therefore the one place that must
+    // guarantee the link is reported offline.
+    if (online) {
+      online = false;
+      onEffect(PhoneOnlineChanged(pc.pcId, false));
+    }
   }
 
   bool _stale(int gen) => !_running || gen != _gen;
+
+  /// Sleeps for [d], but returns as soon as [stop] wakes it — so a slow
+  /// backoff never makes `stop()` block for the full duration.
+  Future<void> _delayOrWake(Duration d) async {
+    final wake = Completer<void>();
+    _wakeCompleter = wake;
+    await Future.any([Future<void>.delayed(d), wake.future]);
+    if (identical(_wakeCompleter, wake)) _wakeCompleter = null;
+  }
+
+  /// Awaits `_resolve(pcId)`, but returns `null` as soon as [stop] wakes
+  /// it (the caller must check staleness before trusting a `null` result
+  /// as "no host found" versus "we gave up waiting"). The underlying
+  /// lookup itself can't be cancelled, only abandoned.
+  Future<String?> _resolveOrWake(String pcId) async {
+    final wake = Completer<void>();
+    _wakeCompleter = wake;
+    final race = Completer<String?>();
+    unawaited(_resolve!(pcId).then((v) {
+      if (!race.isCompleted) race.complete(v);
+    }, onError: (Object _) {
+      if (!race.isCompleted) race.complete(null);
+    }));
+    unawaited(wake.future.then((_) {
+      if (!race.isCompleted) race.complete(null);
+    }));
+    final result = await race.future;
+    if (identical(_wakeCompleter, wake)) _wakeCompleter = null;
+    return result;
+  }
 
   Future<void> _loop(int gen) async {
     while (!_stale(gen)) {
       WebSocket? ws;
       try {
-        final host = _pendingHost ?? pc.host;
+        final host = (_pendingHost != null && _preferPending) ? _pendingHost! : pc.host;
         ws = await _connect(host, pc.port, pc.fingerprint);
         if (_stale(gen)) return; // stop() raced the connect: close in finally, don't touch _ws.
         _ws = ws;
-        _apply(await _session.hello(pc));
+        _apply(await _session.hello(pc), ws, gen);
         if (_stale(gen)) return;
         await for (final data in ws) {
           if (_stale(gen)) break;
           if (data is! String) break;
           final fx = await _session.onFrame(pc, data);
-          if (_isWelcome(data)) _markOnline(host);
-          _apply(fx);
+          if (_isWelcome(data)) _markOnline(host, gen);
+          _apply(fx, ws, gen);
           if (_stale(gen)) break;
         }
+        // That connect attempt is now settled (success or failure): the
+        // *next* one alternates to the other candidate host, so a
+        // pendingHost that keeps failing doesn't crowd out retrying the
+        // stored one, and vice versa.
+        if (_pendingHost != null) _preferPending = !_preferPending;
       } on Object {
-        // Connect or read failure: fall through to the backoff below.
+        if (_pendingHost != null) _preferPending = !_preferPending;
       } finally {
         final leaked = ws;
         if (leaked != null) {
@@ -130,15 +188,23 @@ final class PcLink implements PcLinkApi {
         }
         if (identical(_ws, ws)) _ws = null;
       }
-      _markOffline();
+      _markOffline(gen);
       if (_stale(gen)) return;
       if (_attempt >= 1 && _resolve != null) {
-        final h = await _resolve(pc.pcId);
-        if (_stale(gen)) return; // e.g. revoked while we were resolving.
-        if (h != null && h != pc.host) _pendingHost = h;
+        final h = await _resolveOrWake(pc.pcId);
+        if (_stale(gen)) return; // e.g. revoked/stopped while we were resolving.
+        final newPendingHost = (h != null && h != pc.host) ? h : null;
+        // Only reset the alternation to "try it first" for a genuinely
+        // new candidate; re-resolving the *same* host we're already
+        // alternating against must not keep clobbering the toggle back to
+        // "prefer pending", or the alternation above never gets a chance
+        // to actually try the stored host again.
+        if (newPendingHost != _pendingHost) _preferPending = true;
+        _pendingHost = newPendingHost;
       }
       if (_stale(gen)) return;
-      await Future<void>.delayed(_backoff(_attempt));
+      await _delayOrWake(_backoff(_attempt));
+      if (_stale(gen)) return; // woken by stop(): don't touch _attempt.
       _attempt++;
     }
   }
@@ -151,7 +217,8 @@ final class PcLink implements PcLinkApi {
     }
   }
 
-  void _markOnline(String connectedHost) {
+  void _markOnline(String connectedHost, int gen) {
+    if (_stale(gen)) return;
     _attempt = 0;
     if (!online) {
       online = true;
@@ -164,20 +231,30 @@ final class PcLink implements PcLinkApi {
     _pendingHost = null;
   }
 
-  void _markOffline() {
+  void _markOffline(int gen) {
+    // stop() already guarantees the offline transition for a generation
+    // it just tore down; a stale generation reporting it too could race a
+    // *newer* generation's online state after stop()'s 6s bound expires.
+    if (_stale(gen)) return;
     if (online) {
       online = false;
       onEffect(PhoneOnlineChanged(pc.pcId, false));
     }
   }
 
-  void _apply(List<PhoneEffect> fx) {
+  /// Applies [fx] against the socket local to *this* loop iteration/
+  /// generation (never the shared [_ws] field, which may already belong
+  /// to a newer generation by the time a stale one's `onFrame` — e.g. a
+  /// slow biometric sign — finally resolves) and drops every effect
+  /// outright once stale, instead of forwarding them to [onEffect].
+  void _apply(List<PhoneEffect> fx, WebSocket ws, int gen) {
+    if (_stale(gen)) return;
     for (final e in fx) {
       switch (e) {
         case PhoneSend():
-          _ws?.add(e.frame);
+          ws.add(e.frame);
         case PhoneClose():
-          unawaited(_ws?.close());
+          unawaited(ws.close());
         default:
           onEffect(e);
       }
@@ -201,15 +278,34 @@ final class PcLink implements PcLinkApi {
     Connect? connect,
   }) async {
     WebSocket? ws;
+    var cancelled = false;
+    final attempt = _pair(
+      qr: qr,
+      session: session,
+      onEffect: onEffect,
+      connect: connect,
+      bindSocket: (w) => ws = w,
+      isCancelled: () => cancelled,
+    );
     try {
-      return await _pair(qr: qr, session: session, onEffect: onEffect, connect: connect, bindSocket: (w) => ws = w)
-          .timeout(const Duration(seconds: 60));
+      return await attempt.timeout(const Duration(seconds: 60));
     } finally {
       // Covers the timeout path: `_pair`'s own try/finally already closes
       // the socket on every path it controls, so this is a best-effort
       // backstop for "the future never even got a chance to unwind" (the
       // 60 s timeout abandons — but doesn't cancel — the original future).
+      // `cancelled` additionally stops a connect that was still pending
+      // when the timeout fired from proceeding to actually pair once it
+      // finally resolves — without it, the desktop could complete pairing
+      // on its side after the phone already reported failure to its
+      // caller.
+      cancelled = true;
       unawaited(ws?.close());
+      // The abandoned attempt still runs to completion internally (Dart's
+      // Future.timeout doesn't cancel it); observe its eventual result so
+      // it doesn't surface as an unhandled zone error once `cancelled`
+      // makes it throw.
+      unawaited(attempt.then((_) {}, onError: (_) {}));
     }
   }
 
@@ -218,10 +314,15 @@ final class PcLink implements PcLinkApi {
     required PhoneSession session,
     required void Function(PhoneEffect) onEffect,
     required void Function(WebSocket) bindSocket,
+    required bool Function() isCancelled,
     Connect? connect,
   }) async {
     final ws = await (connect ?? _defaultConnect)(qr.host, qr.port, qr.fingerprint);
     bindSocket(ws);
+    if (isCancelled()) {
+      await ws.close();
+      throw StateError('appairage: délai dépassé pendant la connexion');
+    }
     final queue = StreamQueue<Object?>(ws);
     var closed = false;
     Future<void> closeWs() async {
