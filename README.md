@@ -41,6 +41,17 @@ pas de cloud, pas de compte : tout se passe sur le réseau local.
 3. **Appairer** : icône BioKey → Ouvrir BioKey… → onglet Téléphone →
    Afficher le QR → scanner depuis le téléphone → poser le doigt.
 
+### Hors de chez soi
+
+Pour joindre le PC hors du réseau local, installez
+[WireGuard](https://www.wireguard.com/) ou [Tailscale](https://tailscale.com/)
+sur le téléphone et sur le PC, dans le même tunnel privé. Sur le téléphone,
+ouvrez BioKey → menu du PC (⋮) → « Modifier l'adresse… » → entrez l'IP du
+tunnel ou le nom MagicDNS du PC (ex. `pc-maison.tailnet.ts.net`). L'appairage,
+le certificat épinglé et le secret de session restent inchangés — seule
+l'adresse change. BioKey n'utilise et ne fournit aucun relais : le trafic
+passe uniquement par votre tunnel.
+
 ### Protéger une application
 
 Icône BioKey → Ouvrir BioKey… → onglet Apps → Ajouter → « Créer le
@@ -130,6 +141,17 @@ stays on the local network.
    notifications and the battery-optimization exclusion.
 3. **Pair**: BioKey tray icon → Open BioKey… → Phone tab → Show QR → scan
    from the phone → place your finger.
+
+### Away from home
+
+To reach the PC outside the local network, install
+[WireGuard](https://www.wireguard.com/) or [Tailscale](https://tailscale.com/)
+on both the phone and the PC, joined to the same private tunnel. On the
+phone, open BioKey → the PC's menu (⋮) → "Modifier l'adresse…" → enter the
+PC's tunnel IP or MagicDNS name (e.g. `pc-maison.tailnet.ts.net`). Pairing,
+the pinned certificate and the session secret are unchanged — only the
+address changes. BioKey never uses or provides a relay: traffic only ever
+flows through your own tunnel.
 
 ### Protect an app
 

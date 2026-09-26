@@ -14,8 +14,8 @@ abstract interface class TaskTransport {
 
 /// Operation names used on a [TaskTransport].
 ///
-/// UI → task commands: [getState], [pair], [revoke], [refresh].
-/// Task → UI state: [state], [pairResult], [revoked].
+/// UI → task commands: [getState], [pair], [revoke], [refresh], [setHost].
+/// Task → UI state: [state], [pairResult], [revoked], [setHostResult].
 /// Task → UI signer requests: [ping], [sign], [ensurePublicKey], [deleteKey];
 /// UI → task replies (same `reqId`): [pong], [sig], [err], [pub], [ok].
 abstract final class TaskOps {
@@ -23,10 +23,12 @@ abstract final class TaskOps {
   static const pair = 'pair';
   static const revoke = 'revoke';
   static const refresh = 'refresh';
+  static const setHost = 'setHost';
 
   static const state = 'state';
   static const pairResult = 'pairResult';
   static const revoked = 'revoked';
+  static const setHostResult = 'setHostResult';
 
   static const ping = 'ping';
   static const sign = 'sign';

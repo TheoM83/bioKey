@@ -56,6 +56,20 @@ void main() {
     await link.stop();
   });
 
+  test('connects using a hostname (localhost) instead of an IP literal — a manual host can be a MagicDNS/tunnel name', () async {
+    final signer = FakeSigner();
+    final ps = PhoneSession(signer: signer, clock: const SystemClock());
+    ds.startPairing();
+    final qr = QrPayload(pcId: id.pcId, name: 'PC', host: 'localhost', port: server.port, fingerprint: id.fingerprintB64Url, token: ds.pairingToken!);
+    final paired = await PcLink.pair(qr: qr, session: ps, onEffect: (_) {}).timeout(const Duration(seconds: 5));
+    expect(paired.host, 'localhost');
+
+    final link = PcLink(pc: paired, session: ps, onEffect: (_) {});
+    await link.start();
+    await _until(() => ds.phoneOnline);
+    await link.stop();
+  });
+
   test('pairing with wrong fingerprint fails', () async {
     ds.startPairing();
     final qr = QrPayload(pcId: id.pcId, name: 'PC', host: '127.0.0.1', port: server.port, fingerprint: 'wrong', token: ds.pairingToken!);
