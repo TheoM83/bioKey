@@ -19,7 +19,7 @@ vérifie la signature et lance les applications protégées. Pas de serveur,
 pas de cloud, pas de compte : tout se passe sur le réseau local.
 
 ```
- ┌──────────────┐   wss://  TLS épinglé (QR)   ┌──────────────┐
+ ┌──────────────┐   TLS épinglé (QR) · trames JSON   ┌──────────────┐
  │  Téléphone   │ ───────────────────────────► │      PC      │
  │  (Android)   │        signature seule        │  (Windows)   │
  │  clé biométr.│ ◄─────────────────────────── │  vérif. + tray│
@@ -122,7 +122,7 @@ and launches the protected app. No server, no cloud, no account — everything
 stays on the local network.
 
 ```
- ┌──────────────┐   wss://  pinned TLS (QR)    ┌──────────────┐
+ ┌──────────────┐   pinned TLS (QR) · JSON frames   ┌──────────────┐
  │    Phone     │ ───────────────────────────► │      PC      │
  │  (Android)   │        signature only         │  (Windows)   │
  │ biometric key│ ◄─────────────────────────── │ verify + tray │

@@ -97,7 +97,7 @@ MoSCoW : **M** indispensable v1 · **S** souhaitable · **C** plus tard.
 |---|---|---|
 | F-30 | PC : lancement à l'ouverture de session, icône barre système, notifications natives, thème clair/sombre système, fenêtre fermée = réduite dans la barre | M |
 | F-31 | Téléphone : service premier plan léger (Android), notification haute priorité ouvrant directement l'invite biométrique, guide d'exclusion de l'optimisation batterie au premier lancement | M |
-| F-32 | Découverte du PC par **mDNS** (`_biokey._tcp`), reconnexion automatique après veille / changement de Wi-Fi / redémarrage | M |
+| F-32 | Découverte du PC par diffusion UDP (port 47623), reconnexion automatique après veille / changement de Wi-Fi / redémarrage | M |
 | F-33 | Tuile de réglages rapides Android, raccourci d'app | C |
 | F-34 | Repli **Bluetooth LE** quand pas de LAN commun | C |
 
@@ -107,7 +107,7 @@ MoSCoW : **M** indispensable v1 · **S** souhaitable · **C** plus tard.
 |---|---|
 | Latence | Clic PC → invite affichée sur le téléphone < 1 s (LAN) ; scénario complet < 3 s |
 | Fiabilité | Reconnexion sans intervention ; 0 demande fantôme ; 0 rejeu possible |
-| Batterie | Connexion WebSocket persistante idle + ping toutes les 45 s ; pas de polling ; < 1 % / jour au repos |
+| Batterie | Connexion TLS persistante idle + ping toutes les 45 s ; pas de polling ; < 1 % / jour au repos |
 | Ressources PC | < 150 Mo RAM au repos (Flutter Windows ≈ 80–120 Mo), < 1 % CPU |
 | Confidentialité | Aucune donnée ne quitte le LAN. Aucun réseau sortant (vérifiable au pare-feu) |
 | Accessibilité | Tailles de texte système, contraste AA, lecteur d'écran sur les 4 écrans |
@@ -200,7 +200,7 @@ Compromis accepté : côté PC, l'UI n'est pas Fluent mais Material 3 aux couleu
 | Invite biométrique | fournie par le même plugin (BiometricPrompt / LocalAuthentication) | Android, iOS |
 | Scan QR | `mobile_scanner` | Android, iOS |
 | Affichage QR | `qr_flutter` | desktop |
-| Découverte (annonce + recherche) | UDP broadcast `dart:io` (port 47623) — plus de mDNS | toutes |
+| Découverte (annonce + recherche) | UDP broadcast `dart:io` (port 47623) | toutes |
 | Transport | `dart:io` `SecureServerSocket`/`SecureSocket` + trames longueur-préfixées — **zéro dépendance** | toutes |
 | Certificat auto-signé + vérification ECDSA | `pointycastle` (Dart pur) seul | desktop |
 | Stockage sécurisé | `flutter_secure_storage` (DPAPI / Keychain / libsecret / Keystore) | toutes |
@@ -221,7 +221,7 @@ biokey/
   lib/
     core/        protocole (messages, versions), crypto (vérif ECDSA, cert), stockage, i18n, thème
     phone/       rôle Téléphone : appairage, service, invite, écran État
-    desktop/     rôle Ordinateur : serveur wss, mDNS, barre système, apps protégées, fenêtre
+    desktop/     rôle Ordinateur : serveur TLS, répondeur UDP, barre système, apps protégées, fenêtre
     main.dart    choisit le rôle selon la plateforme (mobile ⇒ Téléphone, desktop ⇒ Ordinateur)
   test/          core/ testé sans appareil ; desktop/ avec un faux téléphone en mémoire
 ```
@@ -273,7 +273,7 @@ Règle : `core/` ne dépend d'aucun plugin de plateforme. Tout ce qui touche à 
 |---|---|---|
 | `biometric_signature` ne fait pas l'invalidation à l'enrôlement ou casse sur Nothing OS | Sécurité affaiblie / blocage | Testé au J0. Repli : plugin Kotlin maison, périmètre minuscule |
 | Nothing OS tue le service premier plan | Demandes perdues | Exclusion batterie guidée, notification persistante, test réel ; repli : ping plus court |
-| Changement d'IP / réseau | Reconnexion lente | mDNS + cache de la dernière IP + tentative immédiate au retour Wi-Fi |
+| Changement d'IP / réseau | Reconnexion lente | diffusion UDP + cache de la dernière IP + hôte manuel + tentative immédiate au retour Wi-Fi |
 | Flutter desktop : barre système sous Linux (Wayland) | Icône absente | `tray_manager` (StatusNotifier) ; documenter la limite |
 | Instance unique Windows depuis un `.lnk` | Deux BioKey ouverts | Port local + jeton, testé au J1 |
 | Poids Flutter Windows (~100 Mo RAM) | Ressenti « lourd » | Accepté et documenté ; fenêtre jamais rendue tant que non ouverte |
