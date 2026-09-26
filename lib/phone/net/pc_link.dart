@@ -67,8 +67,8 @@ final class PcLink implements PcLinkApi {
 
   static Future<SecureSocket> _defaultConnect(String h, int p, String fp) => connectPinned(host: h, port: p, fingerprint: fp);
 
-  /// The paired PC this link talks to. Only updated once mDNS has resolved
-  /// a new host *and* a `welcome` has actually been received on it (see
+  /// The paired PC this link talks to. Only updated once UDP discovery has
+  /// resolved a new host *and* a `welcome` has actually been received on it (see
   /// [_pendingHost]) — never on the mere hope that a resolved host works.
   @override
   PairedPc pc;
@@ -92,13 +92,13 @@ final class PcLink implements PcLinkApi {
   /// [_delayOrWake]/[_resolveOrWake].
   Completer<void>? _wakeCompleter;
 
-  /// An mDNS-resolved host awaiting confirmation: connect attempts prefer
+  /// A discovery-resolved host awaiting confirmation: connect attempts prefer
   /// it over [pc]'s stored host, but it only overwrites [pc] (and gets
   /// persisted via a [PhonePairedWith] effect) once a `welcome` actually
   /// arrives on it — resolving a host is not proof it's reachable.
   ///
   /// Cleared (not just left stale) whenever `resolveHost` returns `null`
-  /// or the already-stored host, so one bad/transient mDNS answer can't
+  /// or the already-stored host, so one bad/transient discovery answer can't
   /// strand the link on it forever; while it *is* set, connect attempts
   /// alternate between it and [pc]'s stored host (see [_preferPending]) so
   /// a resolved-but-wrong host doesn't crowd out retrying the one that's
@@ -337,7 +337,7 @@ final class PcLink implements PcLinkApi {
   ///
   /// If the QR's host can't be reached (the PC advertised the wrong
   /// interface, e.g. a virtual switch), the PC is looked up by id via
-  /// [resolveHost] (mDNS) and the connection retried once there — still
+  /// [resolveHost] (UDP discovery) and the connection retried once there — still
   /// pinned to the QR's certificate fingerprint. The returned [PairedPc]
   /// records the host that actually worked.
   static Future<PairedPc> pair({

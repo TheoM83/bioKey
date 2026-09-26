@@ -152,7 +152,7 @@ void main() {
     await link.stop();
   });
 
-  test('pairing retries once on the mDNS-resolved host when the QR host is unreachable', () async {
+  test('pairing retries once on the discovery-resolved host when the QR host is unreachable', () async {
     ds.startPairing();
     final qr = QrPayload(pcId: id.pcId, name: 'PC', host: 'unreachable.invalid', port: server.port, fingerprint: id.fingerprintB64Url, token: ds.pairingToken!);
     final tried = <String>[];
@@ -180,7 +180,7 @@ void main() {
     expect(paired.fingerprint, id.fingerprintB64Url);
   });
 
-  test('pairing fails when the QR host is unreachable and mDNS finds nothing', () async {
+  test('pairing fails when the QR host is unreachable and discovery finds nothing', () async {
     ds.startPairing();
     final qr = QrPayload(pcId: id.pcId, name: 'PC', host: 'unreachable.invalid', port: server.port, fingerprint: id.fingerprintB64Url, token: ds.pairingToken!);
     Future<SecureSocket> connect(String h, int p, String fp) => Future<SecureSocket>.error(const SocketException('unreachable'));

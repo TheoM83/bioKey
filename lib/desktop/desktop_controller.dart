@@ -13,8 +13,8 @@ import 'apps/cli.dart';
 import 'apps/launcher.dart';
 import 'apps/protected_app.dart';
 import 'notify.dart';
+import 'server/discovery_responder.dart';
 import 'server/lan.dart';
-import 'server/mdns_advertiser.dart';
 import 'server/tls_server.dart';
 
 /// Wires the pure [DesktopSession] state machine to the [WsServerApi],
@@ -30,7 +30,7 @@ final class DesktopController extends ChangeNotifier {
     required Clock clock,
     required Notifier notifier,
     WsServerApi Function(DesktopIdentity identity, DesktopSession session, void Function(DesktopEffect) onEffect)? serverFactory,
-    MdnsAdvertiser? mdns,
+    DiscoveryResponder? discovery,
     void Function()? onShowWindow,
     void Function()? onDispose,
     Duration phoneWait = const Duration(seconds: 5),
@@ -43,7 +43,7 @@ final class DesktopController extends ChangeNotifier {
         _clock = clock,
         _notifier = notifier,
         _serverFactory = serverFactory,
-        _mdns = mdns,
+        _discovery = discovery,
         _onShowWindow = onShowWindow,
         _onDispose = onDispose,
         _lanAddress = lanAddress,
@@ -56,7 +56,7 @@ final class DesktopController extends ChangeNotifier {
   final Clock _clock;
   final Notifier _notifier;
   final WsServerApi Function(DesktopIdentity, DesktopSession, void Function(DesktopEffect))? _serverFactory;
-  final MdnsAdvertiser? _mdns;
+  final DiscoveryResponder? _discovery;
   final void Function()? _onShowWindow;
   final void Function()? _onDispose;
 
@@ -121,7 +121,7 @@ final class DesktopController extends ChangeNotifier {
     _server = factory(_identity, _session, _onEffect);
     _serverCreated = true;
     await _server.start(port: await _store.port());
-    await _mdns?.start(pcId: _identity.pcId, name: pcName, port: _server.port);
+    await _discovery?.start(pcId: _identity.pcId, name: pcName, tcpPort: _server.port);
 
     _appsCache = await _apps.all();
     _initialized = true;
@@ -337,7 +337,7 @@ final class DesktopController extends ChangeNotifier {
       if (!w.isCompleted) w.complete(false);
     }
     if (_serverCreated) unawaited(_server.stop());
-    unawaited(_mdns?.stop());
+    unawaited(_discovery?.stop());
     _onDispose?.call();
     super.dispose();
   }

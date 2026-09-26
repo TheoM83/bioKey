@@ -7,7 +7,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import '../../core/session/clock.dart';
 import '../../core/storage/phone_store.dart';
 import '../../platform/flutter_secure_kv.dart';
-import '../net/mdns_finder.dart';
+import '../net/discovery_finder.dart';
 import '../net/pc_link.dart';
 import 'link_coordinator.dart';
 import 'proxy_signer.dart';
@@ -48,16 +48,16 @@ final class BiokeyTaskHandler extends TaskHandler {
       notifier: AuthNotifier(),
       cachedPublicKey: store.pubKey,
     );
-    final mdns = MdnsFinder();
+    final discovery = DiscoveryFinder();
     final coordinator = LinkCoordinator(
       store: store,
       signer: signer,
       clock: const SystemClock(),
       send: _transport.send,
       linkFactory: (pc, session, onEffect) =>
-          PcLink(pc: pc, session: session, onEffect: onEffect, resolveHost: mdns.resolveHost),
+          PcLink(pc: pc, session: session, onEffect: onEffect, resolveHost: discovery.resolveHost),
       pairer: (qr, session, onEffect) =>
-          PcLink.pair(qr: qr, session: session, onEffect: onEffect, resolveHost: mdns.resolveHost),
+          PcLink.pair(qr: qr, session: session, onEffect: onEffect, resolveHost: discovery.resolveHost),
     );
     final backend = TaskBackend(transport: _transport, coordinator: coordinator, replies: signer.handleMessage);
     _signer = signer;

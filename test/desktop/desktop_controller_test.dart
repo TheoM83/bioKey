@@ -26,7 +26,7 @@ void main() {
         store: DesktopStore(kv), apps: AppStore(kv), launcher: launcher, verifier: const EcdsaVerifier(),
         clock: clock, notifier: notifier,
         serverFactory: (id, s, onEffect) { session = s; return fakeServer = FakeWsServer(onEffect); },
-        mdns: null,
+        discovery: null,
         phoneWait: phoneWait,
         onShowWindow: onShowWindow,
         // Fixed instead of the real primaryLanIPv4(): startPairing() must not
