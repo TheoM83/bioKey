@@ -2,23 +2,38 @@ import 'dart:convert';
 import 'secure_kv.dart';
 
 final class PairedPc {
-  const PairedPc({required this.pcId, required this.name, required this.host, required this.port, required this.fingerprint});
-  final String pcId, name, host, fingerprint;
+  const PairedPc({
+    required this.pcId,
+    required this.name,
+    required this.host,
+    required this.port,
+    required this.fingerprint,
+    required this.session,
+  });
+  final String pcId, name, host, fingerprint, session;
   final int port;
-  Map<String, Object?> toJson() => {'pcId': pcId, 'name': name, 'host': host, 'port': port, 'fingerprint': fingerprint};
+  Map<String, Object?> toJson() =>
+      {'pcId': pcId, 'name': name, 'host': host, 'port': port, 'fingerprint': fingerprint, 'session': session};
   static PairedPc fromJson(Map<String, Object?> j) => PairedPc(
         pcId: j['pcId']! as String,
         name: j['name']! as String,
         host: j['host']! as String,
         port: j['port']! as int,
         fingerprint: j['fingerprint']! as String,
+        session: j['session']! as String,
       );
 
   @override
   bool operator ==(Object other) =>
-      other is PairedPc && other.pcId == pcId && other.name == name && other.host == host && other.port == port && other.fingerprint == fingerprint;
+      other is PairedPc &&
+      other.pcId == pcId &&
+      other.name == name &&
+      other.host == host &&
+      other.port == port &&
+      other.fingerprint == fingerprint &&
+      other.session == session;
   @override
-  int get hashCode => Object.hash(pcId, name, host, port, fingerprint);
+  int get hashCode => Object.hash(pcId, name, host, port, fingerprint, session);
 }
 
 final class PhoneStore {
@@ -28,7 +43,11 @@ final class PhoneStore {
   Future<List<PairedPc>> pcs() async {
     final s = await _kv.read('pcs');
     if (s == null) return <PairedPc>[];
-    return (jsonDecode(s) as List<Object?>).map((e) => PairedPc.fromJson(e! as Map<String, Object?>)).toList();
+    try {
+      return (jsonDecode(s) as List<Object?>).map((e) => PairedPc.fromJson(e! as Map<String, Object?>)).toList();
+    } on Object {
+      return <PairedPc>[];
+    }
   }
 
   Future<void> _save(List<PairedPc> l) => _kv.write('pcs', jsonEncode(l.map((p) => p.toJson()).toList()));

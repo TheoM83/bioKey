@@ -3,15 +3,16 @@ import 'dart:io' show Platform;
 import 'secure_kv.dart';
 
 final class PairedPhone {
-  const PairedPhone({required this.name, required this.pub});
-  final String name, pub;
-  Map<String, Object?> toJson() => {'name': name, 'pub': pub};
-  static PairedPhone fromJson(Map<String, Object?> j) => PairedPhone(name: j['name']! as String, pub: j['pub']! as String);
+  const PairedPhone({required this.name, required this.pub, required this.session});
+  final String name, pub, session;
+  Map<String, Object?> toJson() => {'name': name, 'pub': pub, 'session': session};
+  static PairedPhone fromJson(Map<String, Object?> j) =>
+      PairedPhone(name: j['name']! as String, pub: j['pub']! as String, session: j['session']! as String);
 
   @override
-  bool operator ==(Object other) => other is PairedPhone && other.name == name && other.pub == pub;
+  bool operator ==(Object other) => other is PairedPhone && other.name == name && other.pub == pub && other.session == session;
   @override
-  int get hashCode => Object.hash(name, pub);
+  int get hashCode => Object.hash(name, pub, session);
 }
 
 final class DesktopStore {
@@ -33,7 +34,12 @@ final class DesktopStore {
 
   Future<PairedPhone?> pairedPhone() async {
     final s = await _kv.read('phone');
-    return s == null ? null : PairedPhone.fromJson(jsonDecode(s) as Map<String, Object?>);
+    if (s == null) return null;
+    try {
+      return PairedPhone.fromJson(jsonDecode(s) as Map<String, Object?>);
+    } on Object {
+      return null;
+    }
   }
 
   Future<void> savePairedPhone(PairedPhone p) => _kv.write('phone', jsonEncode(p.toJson()));
@@ -44,7 +50,13 @@ final class DesktopStore {
 
   Future<int> port() async {
     final s = await _kv.read('port');
-    if (s != null) return int.parse(s);
+    if (s != null) {
+      try {
+        return int.parse(s);
+      } on Object {
+        // corrupt value: fall through and rewrite the default below.
+      }
+    }
     await _kv.write('port', '$defaultPort');
     return defaultPort;
   }

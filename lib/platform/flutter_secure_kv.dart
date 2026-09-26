@@ -1,13 +1,8 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'secure_kv.dart';
+import 'package:biokey/core/storage/secure_kv.dart';
 
 final class FlutterSecureKv implements SecureKv {
-  FlutterSecureKv()
-      : _s = const FlutterSecureStorage(
-          // ignore: deprecated_member_use
-          aOptions: AndroidOptions(encryptedSharedPreferences: true),
-          wOptions: WindowsOptions(),
-        );
+  FlutterSecureKv() : _s = const FlutterSecureStorage();
   final FlutterSecureStorage _s;
   @override
   Future<String?> read(String key) => _s.read(key: key);
