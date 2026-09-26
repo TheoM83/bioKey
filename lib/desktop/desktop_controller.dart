@@ -34,6 +34,7 @@ final class DesktopController extends ChangeNotifier {
     void Function()? onShowWindow,
     void Function()? onDispose,
     Duration phoneWait = const Duration(seconds: 5),
+    Future<String?> Function() lanAddress = primaryLanIPv4,
   })  : _store = store,
         _phoneWait = phoneWait,
         _apps = apps,
@@ -45,6 +46,7 @@ final class DesktopController extends ChangeNotifier {
         _mdns = mdns,
         _onShowWindow = onShowWindow,
         _onDispose = onDispose,
+        _lanAddress = lanAddress,
         _unlock = UnlockCache(clock);
 
   final DesktopStore _store;
@@ -57,6 +59,11 @@ final class DesktopController extends ChangeNotifier {
   final MdnsAdvertiser? _mdns;
   final void Function()? _onShowWindow;
   final void Function()? _onDispose;
+
+  /// The LAN IPv4 address put in the pairing QR; overridable in tests so
+  /// `startPairing` doesn't depend on the test machine actually having a
+  /// LAN interface (see [primaryLanIPv4]).
+  final Future<String?> Function() _lanAddress;
   final UnlockCache _unlock;
 
   /// How long [open] waits for a paired-but-offline phone to (re)connect
@@ -129,7 +136,7 @@ final class DesktopController extends ChangeNotifier {
 
   Future<void> startPairing() async {
     _session.startPairing();
-    final host = await primaryLanIPv4();
+    final host = await _lanAddress();
     if (host == null) {
       await _notifier.show('BioKey', 'Aucun réseau local détecté — connectez le PC au Wi-Fi ou au câble');
       return;
@@ -246,6 +253,8 @@ final class DesktopController extends ChangeNotifier {
       case PhoneOnline():
         _online = e.online;
         if (e.online) {
+          // A successful `hello` proves the stored pairing is fine again.
+          _needsRepair = false;
           for (final w in _onlineWaiters.toList()) {
             if (!w.isCompleted) w.complete(true);
           }

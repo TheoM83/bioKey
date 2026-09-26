@@ -35,14 +35,15 @@ Future<void> runPhone() async {
   await store.pubKey();
   final gate = ForegroundGate()..attach();
   final signer = BiometricSignatureSigner(store, waitForeground: gate.whenResumed);
-  final controller = PhoneController(transport: uiTaskTransport(), signer: signer, store: store, gate: gate);
+  final transport = uiTaskTransport();
+  final controller = PhoneController(transport: transport, signer: signer, store: store, gate: gate);
   // Listen before the service starts so its first state isn't missed.
   await controller.init();
 
   String? serviceError;
   try {
     await requestForegroundPermissions();
-    final result = await startForegroundService();
+    final result = await startForegroundService(transport: transport);
     if (result is ServiceRequestFailure) serviceError = '${result.error}';
   } on Object catch (e) {
     serviceError = '$e';

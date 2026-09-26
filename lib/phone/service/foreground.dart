@@ -20,6 +20,13 @@ void startCallback() {
   FlutterForegroundTask.setTaskHandler(BiokeyTaskHandler());
 }
 
+/// Alias kept so a service callback handle stored before this entry point
+/// was renamed to [startCallback] (e.g. by the OS across an in-place
+/// upgrade, before [startForegroundService] gets a chance to rebuild it —
+/// see there) still resolves to a real handler instead of running headless.
+@pragma('vm:entry-point')
+void biokeyForegroundStartCallback() => startCallback();
+
 /// Runs the phone's network side ([LinkCoordinator]) in the service
 /// isolate. Its signer is a [ProxySigner] to the UI isolate, which owns the
 /// biometric key; with no UI attached it launches the app / shows the
@@ -108,20 +115,120 @@ void _initForegroundTask() {
   );
 }
 
+/// The subset of [FlutterForegroundTask]'s static service-lifecycle calls
+/// that [startForegroundService] needs, behind an interface so it (and its
+/// handler-recovery logic) can be unit-tested without the real plugin.
+abstract interface class ForegroundServiceApi {
+  Future<bool> get isRunningService;
+
+  Future<ServiceRequestResult> startService({
+    required List<ForegroundServiceTypes> serviceTypes,
+    required String notificationTitle,
+    required String notificationText,
+    required void Function() callback,
+  });
+
+  /// Rebuilds the running task with [callback] when its callback handle
+  /// differs from the one it's currently running with; a no-op otherwise.
+  Future<ServiceRequestResult> updateService({required void Function() callback});
+
+  Future<ServiceRequestResult> restartService();
+}
+
+final class _PluginForegroundService implements ForegroundServiceApi {
+  const _PluginForegroundService();
+
+  @override
+  Future<bool> get isRunningService => FlutterForegroundTask.isRunningService;
+
+  @override
+  Future<ServiceRequestResult> startService({
+    required List<ForegroundServiceTypes> serviceTypes,
+    required String notificationTitle,
+    required String notificationText,
+    required void Function() callback,
+  }) =>
+      FlutterForegroundTask.startService(
+        serviceTypes: serviceTypes,
+        notificationTitle: notificationTitle,
+        notificationText: notificationText,
+        callback: callback,
+      );
+
+  @override
+  Future<ServiceRequestResult> updateService({required void Function() callback}) =>
+      FlutterForegroundTask.updateService(callback: callback);
+
+  @override
+  Future<ServiceRequestResult> restartService() => FlutterForegroundTask.restartService();
+}
+
 /// Starts the persistent `connectedDevice` foreground service that owns the
-/// links to paired PCs — or, if it already runs (e.g. started at boot),
-/// leaves it alone: restarting it would drop every live link.
-Future<ServiceRequestResult> startForegroundService() async {
+/// links to paired PCs — or, if it already runs (e.g. started at boot, or
+/// resumed by the OS right after an in-place upgrade via
+/// `autoRunOnMyPackageReplaced`), makes sure it is running with the
+/// *current* [startCallback] handle: a service resumed after an upgrade
+/// restarts with whatever handle was stored before it, which can resolve to
+/// nothing once the entry point has moved — leaving the service running
+/// with no [BiokeyTaskHandler] and no link to any paired PC, and nothing
+/// else would ever restart it.
+///
+/// After starting/updating, a `getState` probe is sent over [transport]
+/// (when given — the real caller always has the UI's task transport) and,
+/// if no `state` reply arrives within [handlerCheckTimeout], the service is
+/// force-restarted once: proof the handler is actually alive, not just the
+/// service process.
+Future<ServiceRequestResult> startForegroundService({
+  TaskTransport? transport,
+  ForegroundServiceApi api = const _PluginForegroundService(),
+  Duration handlerCheckTimeout = const Duration(seconds: 5),
+}) async {
   _initForegroundTask();
-  if (await FlutterForegroundTask.isRunningService) {
-    return const ServiceRequestSuccess();
+  final result = await api.isRunningService
+      ? await api.updateService(callback: startCallback)
+      : await api.startService(
+          serviceTypes: const [ForegroundServiceTypes.connectedDevice],
+          notificationTitle: 'BioKey',
+          notificationText: 'BioKey veille sur vos PC',
+          callback: startCallback,
+        );
+  if (result is ServiceRequestSuccess) {
+    await _ensureHandlerRunning(api: api, transport: transport, timeout: handlerCheckTimeout);
   }
-  return FlutterForegroundTask.startService(
-    serviceTypes: const [ForegroundServiceTypes.connectedDevice],
-    notificationTitle: 'BioKey',
-    notificationText: 'BioKey veille sur vos PC',
-    callback: startCallback,
-  );
+  return result;
+}
+
+/// Sends `{op: 'getState'}` and waits for a `state` reply; if none arrives
+/// within [timeout], the running service process has no working task
+/// handler (a callback handle that resolved to nothing), so it's
+/// force-restarted once.
+Future<void> _ensureHandlerRunning({
+  required ForegroundServiceApi api,
+  required TaskTransport? transport,
+  required Duration timeout,
+}) async {
+  if (transport == null) return; // caller opted out of the liveness check.
+  if (await _stateReplyArrives(transport, timeout)) return;
+  try {
+    await api.restartService();
+  } on Object {
+    // Best-effort: the UI's own getState retry loop (PhoneController) will
+    // keep probing regardless, so a failed restart here just delays
+    // recovery rather than losing it.
+  }
+}
+
+Future<bool> _stateReplyArrives(TaskTransport transport, Duration timeout) async {
+  final completer = Completer<bool>();
+  final sub = transport.messages.listen((m) {
+    if (m['op'] == TaskOps.state && !completer.isCompleted) completer.complete(true);
+  });
+  try {
+    transport.send({'op': TaskOps.getState});
+    return await completer.future.timeout(timeout, onTimeout: () => false);
+  } finally {
+    await sub.cancel();
+  }
 }
 
 /// The UI isolate's end of the channel to the service.

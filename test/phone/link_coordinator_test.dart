@@ -122,6 +122,42 @@ void main() {
     expect(created.where((l) => l.started), hasLength(1));
   });
 
+  test('two overlapping commands for the same PC are serialised, not raced', () async {
+    await store.upsertPc(makePc('a'));
+    await startBackend();
+
+    // The first pair blocks mid-flight (inside _pair, before _startLink
+    // runs): if handleCommand calls weren't serialised, the second command
+    // — sent while the first is still stuck here — would run its own
+    // _startLink/_stopLink concurrently with the first's.
+    final firstGate = Completer<void>();
+    var pairCalls = 0;
+    pairer = (qr) async {
+      pairCalls++;
+      if (pairCalls == 1) await firstGate.future;
+      return makePc('a', host: 'h$pairCalls');
+    };
+    const qr = QrPayload(pcId: 'a', name: 'PC a', host: 'h', port: 1, fingerprint: 'fp', token: 't');
+
+    link.ui.send({'op': TaskOps.pair, 'reqId': 'u1', 'qr': qr.toUri().toString()});
+    await settle();
+    expect(pairCalls, 1, reason: 'sanity: the first pair is in flight, gated');
+
+    link.ui.send({'op': TaskOps.pair, 'reqId': 'u2', 'qr': qr.toUri().toString()});
+    await settle();
+    expect(pairCalls, 1, reason: 'the second command must queue behind the first rather than run concurrently');
+    expect(ui.where((m) => m['op'] == TaskOps.pairResult), isEmpty);
+
+    firstGate.complete();
+    await settle();
+
+    expect(pairCalls, 2);
+    final results = ui.where((m) => m['op'] == TaskOps.pairResult).toList();
+    expect(results.map((m) => m['reqId']), ['u1', 'u2'], reason: 'both commands complete, in the order they arrived');
+    expect(latest('a').pc.host, 'h2', reason: 'the second pair ran (and replaced the first link) only after the first finished');
+    expect(created.where((l) => l.pc.pcId == 'a' && l.started), hasLength(1), reason: 'never two live links for the same PC');
+  });
+
   test('a failed pairing answers ok:false with the reason', () async {
     pairer = (_) async => throw StateError('appairage refusé');
     await startBackend();

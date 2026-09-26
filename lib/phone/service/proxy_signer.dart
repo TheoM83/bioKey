@@ -35,7 +35,7 @@ final class ProxySigner implements BiometricSigner {
     Future<String?> Function()? cachedPublicKey,
     this.pingTimeout = const Duration(seconds: 1),
     this.uiWait = const Duration(seconds: 25),
-    this.replyTimeout = const Duration(seconds: 90),
+    this.replyTimeout = const Duration(seconds: 40),
   })  : _send = send,
         _isAppOnForeground = isAppOnForeground,
         _launchApp = launchApp,

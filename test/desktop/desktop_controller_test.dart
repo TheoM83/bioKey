@@ -29,6 +29,9 @@ void main() {
         mdns: null,
         phoneWait: phoneWait,
         onShowWindow: onShowWindow,
+        // Fixed instead of the real primaryLanIPv4(): startPairing() must not
+        // depend on the test machine actually having a LAN interface.
+        lanAddress: () async => '192.168.1.42',
       );
 
   setUp(() async {
@@ -153,7 +156,7 @@ void main() {
 
   test('PairingExpired clears the pairing QR', () async {
     await c.startPairing();
-    if (c.pairingQr == null) return; // no LAN interface on this machine
+    expect(c.pairingQr, isNotNull);
     clock.now += 121;
     fakeServer.apply(session.tick());
     expect(c.pairingQr, isNull);
@@ -170,6 +173,14 @@ void main() {
     expect(notified, greaterThan(0));
 
     await c.revokePhone();
+    expect(c.phoneNeedsRepair, isFalse);
+  });
+
+  test('a later PhoneOnline(true) also clears phoneNeedsRepair (a fresh hello proves the pairing is fine)', () async {
+    fakeServer.onEffect(const PairingInvalid());
+    expect(c.phoneNeedsRepair, isTrue);
+
+    fakeServer.onEffect(const PhoneOnline(true));
     expect(c.phoneNeedsRepair, isFalse);
   });
 

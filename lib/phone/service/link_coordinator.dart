@@ -51,6 +51,12 @@ final class LinkCoordinator {
   var _pcs = <PairedPc>[];
   var _stopped = false;
 
+  /// Serialises [handleCommand] calls into a single FIFO: `refresh`/`pair`/
+  /// `revoke` for the same PC would otherwise run concurrently (each
+  /// `handleCommand` call is fired un-awaited by [TaskBackend]) and race
+  /// `_startLink`/`_stopLink` against one another.
+  Future<void> _commandQueue = Future<void>.value();
+
   /// Test hooks.
   Map<String, PcLinkApi> get links => Map.unmodifiable(_links);
   List<PairedPc> get pcs => List.unmodifiable(_pcs);
@@ -63,7 +69,20 @@ final class LinkCoordinator {
     publishState();
   }
 
-  Future<void> handleCommand(Map<String, Object?> m) async {
+  /// Queues [m] behind whatever `handleCommand` call is already running:
+  /// `TaskBackend` fires each incoming command un-awaited, so without this
+  /// two commands for the same PC (e.g. `pair` then `revoke`, or a
+  /// concurrent `refresh`) could interleave their `_startLink`/`_stopLink`
+  /// calls. The returned future still carries [m]'s own outcome/error; only
+  /// the *queue* swallows errors, so one failed command can't wedge the
+  /// ones behind it.
+  Future<void> handleCommand(Map<String, Object?> m) {
+    final result = _commandQueue.then((_) => _handleCommand(m));
+    _commandQueue = result.catchError((Object _, StackTrace _) {});
+    return result;
+  }
+
+  Future<void> _handleCommand(Map<String, Object?> m) async {
     if (_stopped) return;
     switch (m['op']) {
       case TaskOps.getState:
