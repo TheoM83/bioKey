@@ -5,6 +5,7 @@ class FakeSigner implements BiometricSigner {
   final keys = TestKeys();
   final prompts = <String>[];
   bool cancelNext = false, failNext = false, throwNext = false;
+  int deleteCalls = 0;
 
   @override
   Future<String> ensurePublicKey() async => keys.pubSpkiB64;
@@ -28,5 +29,7 @@ class FakeSigner implements BiometricSigner {
   }
 
   @override
-  Future<void> deleteKey() async {}
+  Future<void> deleteKey() async {
+    deleteCalls++;
+  }
 }

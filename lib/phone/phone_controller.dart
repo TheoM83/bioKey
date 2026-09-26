@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/widgets.dart';
+import 'package:flutter/foundation.dart';
 
 import '../core/pairing/qr_payload.dart';
 import '../core/session/biometric_signer.dart';
@@ -9,6 +9,7 @@ import '../core/session/phone_session.dart';
 import '../core/storage/phone_store.dart';
 import 'net/pc_link.dart';
 import 'service/foreground.dart';
+import 'service/foreground_gate.dart';
 
 typedef LinkFactory = PcLinkApi Function(PairedPc pc, PhoneSession session, void Function(PhoneEffect) onEffect);
 
@@ -22,22 +23,22 @@ final class PhoneController extends ChangeNotifier {
     required BiometricSigner signer,
     required Clock clock,
     LinkFactory? linkFactory,
-    AuthNotifier? authNotifier,
-    bool Function()? isAppForeground,
+    AuthNotifierApi? authNotifier,
+    ForegroundGateApi? gate,
   })  : _store = store,
         _signer = signer,
-        _session = PhoneSession(signer: signer, clock: clock),
         _linkFactory = linkFactory ?? ((pc, session, onEffect) => PcLink(pc: pc, session: session, onEffect: onEffect)),
-        _authNotifier = authNotifier,
-        _isAppForeground = isAppForeground ?? _defaultIsAppForeground;
+        _authNotifier = authNotifier ?? AuthNotifier(),
+        _gate = gate ?? (ForegroundGate()..attach()) {
+    _session = PhoneSession(signer: signer, clock: clock, onAuthShown: _onAuthShownEarly);
+  }
 
   final PhoneStore _store;
   final BiometricSigner _signer;
-  final PhoneSession _session;
+  late final PhoneSession _session;
   final LinkFactory _linkFactory;
-  AuthNotifier? _authNotifier;
-  bool _authNotifierReady = false;
-  final bool Function() _isAppForeground;
+  final AuthNotifierApi _authNotifier;
+  final ForegroundGateApi _gate;
 
   final _links = <String, PcLinkApi>{};
   final _onlinePcIds = <String>{};
@@ -56,19 +57,21 @@ final class PhoneController extends ChangeNotifier {
   Future<void> init() async {
     _pcs = await _store.pcs();
     for (final pc in _pcs) {
-      _startLink(pc);
+      await _startLink(pc);
     }
     _notify();
   }
 
   /// Runs the pairing handshake against [qr]'s desktop, persists the
-  /// resulting [PairedPc], and starts its reconnecting link.
+  /// resulting [PairedPc], and (re)starts its reconnecting link — stopping
+  /// any previous link for the same PC first, so re-pairing an already
+  /// paired PC never leaves an orphaned link running alongside the new one.
   Future<PairedPc> pair(QrPayload qr) async {
     final pc = await PcLink.pair(qr: qr, session: _session, onEffect: _onEffect);
     await _store.upsertPc(pc);
     _pcs = await _store.pcs();
     needsRepair.remove(pc.pcId);
-    _startLink(pc);
+    await _startLink(pc);
     _notify();
     return pc;
   }
@@ -77,10 +80,9 @@ final class PhoneController extends ChangeNotifier {
   /// — deletes the biometric key (there is nothing left for it to prove
   /// possession of).
   Future<void> revoke(String pcId) async {
-    final link = _links.remove(pcId);
-    await link?.stop();
-    _onlinePcIds.remove(pcId);
+    await _stopLink(pcId);
     needsRepair.remove(pcId);
+    _onlinePcIds.remove(pcId);
     await _store.removePc(pcId);
     _pcs = await _store.pcs();
     if (_pcs.isEmpty) {
@@ -89,18 +91,33 @@ final class PhoneController extends ChangeNotifier {
     _notify();
   }
 
-  void _startLink(PairedPc pc) {
+  Future<void> _startLink(PairedPc pc) async {
+    await _stopLink(pc.pcId); // never let two links for the same PC run at once.
     final link = _linkFactory(pc, _session, _onEffect);
     _links[pc.pcId] = link;
     unawaited(link.start());
   }
 
+  Future<void> _stopLink(String pcId) async {
+    final link = _links.remove(pcId);
+    if (link != null) await link.stop();
+  }
+
   void _onEffect(PhoneEffect e) {
     switch (e) {
       case PhonePairedWith():
-        unawaited(_onHostUpdated(e.pc));
+        // A revoked PC's link can still be mid-teardown when it resolves a
+        // host it was already trying before stop(): ignore it, there's
+        // nothing to persist a rediscovered host onto anymore.
+        if (_links.containsKey(e.pc.pcId)) {
+          unawaited(_onHostUpdated(e.pc));
+        }
       case PhoneUnknownByPc():
         needsRepair.add(e.pcId);
+        // This session will never succeed — the desktop no longer
+        // recognises it — so stop retrying with it; needsRepair prompts
+        // the user to re-pair from scratch instead.
+        unawaited(_stopLink(e.pcId));
         _notify();
       case PhoneOnlineChanged():
         if (e.online) {
@@ -110,7 +127,11 @@ final class PhoneController extends ChangeNotifier {
         }
         _notify();
       case PhoneAuthShown():
-        unawaited(_onAuthShown(e));
+        // Handled synchronously via PhoneSession's onAuthShown callback
+        // (see the constructor) so the notification can appear *before*
+        // the (blocking) biometric prompt, not after; this effect is a
+        // no-op here to avoid double-firing it.
+        break;
       case PhoneSend():
       case PhoneClose():
         break;
@@ -124,19 +145,32 @@ final class PhoneController extends ChangeNotifier {
   }
 
   /// Surfaces a high-priority notification for an incoming auth request
-  /// when the app isn't in the foreground — the biometric prompt itself is
-  /// already showing by the time this effect arrives (`sign()` runs as
-  /// soon as the `auth` frame does), so this only needs to get the user's
-  /// attention, not gate anything.
-  Future<void> _onAuthShown(PhoneAuthShown e) async {
-    if (_isAppForeground()) return;
-    final notifier = _authNotifier ??= AuthNotifier();
-    if (!_authNotifierReady) {
-      await notifier.init();
-      _authNotifierReady = true;
-    }
-    await notifier.showAuthPrompt(label: e.label, pcName: e.pcName);
+  /// when the app isn't in the foreground — the biometric prompt itself
+  /// cannot even be shown from a backgrounded Android activity until the
+  /// user brings BioKey forward, so this needs to fire *before* `sign()`
+  /// runs, not after (see [PhoneSession]'s `onAuthShown` callback).
+  void _onAuthShownEarly(PhoneAuthShown e) {
+    if (_gate.isResumed) return;
+    unawaited(_showAndAutoCancel(e));
   }
+
+  Future<void> _showAndAutoCancel(PhoneAuthShown e) async {
+    final id = _authNotificationId(e.label, e.pcName);
+    await _authNotifier.init();
+    await _authNotifier.showAuthPrompt(id: id, label: e.label, pcName: e.pcName);
+    try {
+      await _gate.whenResumed(timeout: const Duration(seconds: 35));
+    } on Object {
+      // Timed out without the app resuming — still cancel below; the auth
+      // request itself has its own (shorter) server-side TTL.
+    }
+    await _authNotifier.cancel(id);
+  }
+
+  /// A stable-per-request (not fixed) notification id, so two different
+  /// concurrent auth requests (different PCs, or a retried request with a
+  /// different label) don't clobber each other's notification.
+  int _authNotificationId(String label, String pcName) => Object.hash(label, pcName) & 0x7fffffff;
 
   void _notify() {
     if (!_disposed) notifyListeners();
@@ -146,11 +180,8 @@ final class PhoneController extends ChangeNotifier {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
-    for (final link in _links.values) {
-      unawaited(link.stop());
-    }
+    unawaited(Future.wait(_links.values.map((l) => l.stop())));
+    _links.clear();
     super.dispose();
   }
 }
-
-bool _defaultIsAppForeground() => WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
