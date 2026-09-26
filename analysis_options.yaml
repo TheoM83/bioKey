@@ -1,0 +1,11 @@
+include: package:flutter_lints/flutter.yaml
+linter:
+  rules:
+    prefer_final_locals: true
+    unawaited_futures: true
+    avoid_print: true
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true

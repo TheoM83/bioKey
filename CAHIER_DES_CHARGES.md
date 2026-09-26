@@ -123,7 +123,7 @@ MoSCoW : **M** indispensable v1 · **S** souhaitable · **C** plus tard.
 |---|---|
 | Rejeu d'une réponse | Nonce 32 octets aléatoire + id unique + expiration 30 s + liste d'attente à usage unique (F-14) |
 | Usurpation du PC / MITM sur le LAN | TLS 1.3 ; le téléphone **épingle** l'empreinte du certificat reçue par QR (canal visuel, hors réseau) ; toute autre empreinte ⇒ connexion refusée |
-| Usurpation du téléphone | Le PC n'accepte que les signatures vérifiables avec la clé publique mémorisée à l'appairage |
+| Usurpation du téléphone | Le PC n'accepte que les signatures vérifiables avec la clé publique mémorisée à l'appairage. La reconnexion (`hello`) exige en plus le **secret de session** remis à l'appairage (la clé publique n'est pas un secret) ; pas de signature à la reconnexion pour ne pas demander l'empreinte à chaque fois |
 | Appairage forcé par un tiers sur le LAN | Jeton à usage unique dans le QR, 120 s, + empreinte obligatoire pour finaliser |
 | Vol du téléphone déverrouillé | La clé exige la biométrie **à chaque signature** ; pas de repli PIN (D3) |
 | Ajout d'une empreinte par un tiers | Clé invalidée à tout changement d'enrôlement biométrique ⇒ réappairage |
@@ -147,14 +147,14 @@ MoSCoW : **M** indispensable v1 · **S** souhaitable · **C** plus tard.
 PC        affiche QR  biokey://pair?v=1&id=<pcId>&n=<nom>&h=<hôte>&p=<port>&fp=<sha256 cert b64url>&t=<jeton b64url>
 Téléphone → PC        {"type":"pair","v":1,"token":"…","name":"Nothing Phone","pub":"<SPKI b64>"}
 PC        → Téléphone {"type":"pair_challenge","nonce":"<32 o b64>"}
-Téléphone → PC        {"type":"pair_proof","sig":"<ECDSA b64>"}          (après empreinte)
-PC        → Téléphone {"type":"paired","pcId":"…","name":"PC-MAISON"}
+Téléphone → PC        {"type":"pair_proof","sig":"<ECDSA b64>"}          (après empreinte ; signe la chaîne "biokey-pair:" + nonce — séparation de domaine avec les trames auth)
+PC        → Téléphone {"type":"paired","pcId":"…","name":"PC-MAISON","session":"<32 o b64url>"}   (secret de session, stocké des deux côtés)
 ```
 
 **Session**
 
 ```
-Téléphone → PC        {"type":"hello","v":1,"pcId":"…","pub":"<SPKI b64>"}     (à chaque connexion)
+Téléphone → PC        {"type":"hello","v":1,"pcId":"…","pub":"<SPKI b64>","session":"…"}   (à chaque connexion ; session ≠ ⇒ unknown)
 PC        → Téléphone {"type":"welcome"}  ou  {"type":"unknown"}              (unknown ⇒ réappairer)
 PC        → Téléphone {"type":"auth","id":"<uuid>","pcId":"…","action":"open","label":"Mon app","nonce":"…","iat":1780000000,"exp":1780000030}
 Téléphone → PC        {"type":"auth_ok","id":"…","sig":"…"}
