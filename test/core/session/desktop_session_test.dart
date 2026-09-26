@@ -19,17 +19,22 @@ void main() {
   T single<T extends DesktopEffect>(List<DesktopEffect> fx) => fx.whereType<T>().single;
   Message sent(List<DesktopEffect> fx) => Codec.decode(single<SendFrame>(fx).frame);
 
-  List<DesktopEffect> pairFully(String conn) {
+  List<DesktopEffect> pairFully(String conn, {TestKeys? withKeys, String name = 'Nothing'}) {
+    final k = withKeys ?? keys;
     s.startPairing();
-    final fx1 = s.onFrame(conn, Codec.encode(PairMsg(token: s.pairingToken!, name: 'Nothing', pub: keys.pubSpkiB64)));
+    final fx1 = s.onFrame(conn, Codec.encode(PairMsg(token: s.pairingToken!, name: name, pub: k.pubSpkiB64)));
     final ch = sent(fx1) as PairChallengeMsg;
-    return s.onFrame(conn, Codec.encode(PairProofMsg(sig: keys.sign(ch.nonce))));
+    return s.onFrame(conn, Codec.encode(PairProofMsg(sig: k.sign(ch.nonce))));
   }
 
   test('full pairing succeeds and phone becomes online', () {
     final fx = pairFully('c1');
-    expect(sent(fx), isA<PairedMsg>());
-    expect(single<PhonePaired>(fx).phone.pub, keys.pubSpkiB64);
+    final paired = sent(fx) as PairedMsg;
+    expect(paired.pcId, 'pc1');
+    final phonePaired = single<PhonePaired>(fx).phone;
+    expect(phonePaired.pub, keys.pubSpkiB64);
+    expect(phonePaired.session, isNotEmpty);
+    expect(paired.session, phonePaired.session);
     expect(single<PhoneOnline>(fx).online, isTrue);
     expect(s.pairingToken, isNull);
   });
@@ -46,18 +51,75 @@ void main() {
     expect(s.onFrame('c3', Codec.encode(PairMsg(token: tok, name: 'n', pub: 'p'))).single, isA<CloseConn>());
   });
 
+  test('token is single-use: reusing a token consumed by a successful pairing closes', () {
+    s.startPairing();
+    final tok = s.pairingToken!;
+    final fx1 = s.onFrame('c1', Codec.encode(PairMsg(token: tok, name: 'n', pub: keys.pubSpkiB64)));
+    final ch = sent(fx1) as PairChallengeMsg;
+    s.onFrame('c1', Codec.encode(PairProofMsg(sig: keys.sign(ch.nonce))));
+    expect(s.onFrame('c2', Codec.encode(PairMsg(token: tok, name: 'n', pub: 'p'))).single, isA<CloseConn>());
+  });
+
   test('bad pair_proof signature closes', () {
     s.startPairing();
     s.onFrame('c1', Codec.encode(PairMsg(token: s.pairingToken!, name: 'n', pub: keys.pubSpkiB64)));
     expect(s.onFrame('c1', Codec.encode(const PairProofMsg(sig: 'AAAA'))).single, isA<CloseConn>());
   });
 
-  test('hello with known pub → welcome; unknown pub → unknown + close', () {
+  test('pair_proof from a connection other than the candidate closes', () {
+    s.startPairing();
+    s.onFrame('c1', Codec.encode(PairMsg(token: s.pairingToken!, name: 'n', pub: keys.pubSpkiB64)));
+    expect(s.onFrame('intruder', Codec.encode(PairProofMsg(sig: keys.sign('whatever')))).single, isA<CloseConn>());
+  });
+
+  test('second startPairing invalidates the pending pairing candidate', () {
+    s.startPairing();
+    final fx1 = s.onFrame('c1', Codec.encode(PairMsg(token: s.pairingToken!, name: 'n', pub: keys.pubSpkiB64)));
+    final ch = sent(fx1) as PairChallengeMsg;
+    s.startPairing();
+    expect(s.onFrame('c1', Codec.encode(PairProofMsg(sig: keys.sign(ch.nonce)))).single, isA<CloseConn>());
+  });
+
+  test('candidate disconnecting then sending pair_proof closes', () {
+    s.startPairing();
+    final fx1 = s.onFrame('c1', Codec.encode(PairMsg(token: s.pairingToken!, name: 'n', pub: keys.pubSpkiB64)));
+    final ch = sent(fx1) as PairChallengeMsg;
+    s.onDisconnect('c1');
+    expect(s.onFrame('c1', Codec.encode(PairProofMsg(sig: keys.sign(ch.nonce)))).single, isA<CloseConn>());
+  });
+
+  test('pair_proof after the pairing candidate expires closes', () {
+    s.startPairing();
+    final fx1 = s.onFrame('c1', Codec.encode(PairMsg(token: s.pairingToken!, name: 'n', pub: keys.pubSpkiB64)));
+    final ch = sent(fx1) as PairChallengeMsg;
+    clock.now += 121;
+    expect(s.onFrame('c1', Codec.encode(PairProofMsg(sig: keys.sign(ch.nonce)))).single, isA<CloseConn>());
+  });
+
+  test('hello with known pub and session → welcome; unknown pub → unknown + close', () {
+    final fx0 = pairFully('c1');
+    final session = single<PhonePaired>(fx0).phone.session;
+    s.onDisconnect('c1');
+    final fx = s.onFrame('c2', Codec.encode(HelloMsg(pcId: 'pc1', pub: keys.pubSpkiB64, session: session)));
+    expect(sent(fx), isA<WelcomeMsg>());
+    final bad = s.onFrame('c3', Codec.encode(const HelloMsg(pcId: 'pc1', pub: 'other', session: 'x')));
+    expect(sent(bad), isA<UnknownMsg>());
+    expect(bad.whereType<CloseConn>(), isNotEmpty);
+  });
+
+  test('hello with correct pub but wrong session → unknown + close', () {
     pairFully('c1');
     s.onDisconnect('c1');
-    final fx = s.onFrame('c2', Codec.encode(HelloMsg(pcId: 'pc1', pub: keys.pubSpkiB64)));
-    expect(sent(fx), isA<WelcomeMsg>());
-    final bad = s.onFrame('c3', Codec.encode(const HelloMsg(pcId: 'pc1', pub: 'other')));
+    final bad = s.onFrame('c2', Codec.encode(HelloMsg(pcId: 'pc1', pub: keys.pubSpkiB64, session: 'WRONG')));
+    expect(sent(bad), isA<UnknownMsg>());
+    expect(bad.whereType<CloseConn>(), isNotEmpty);
+  });
+
+  test('hello with wrong pcId → unknown + close', () {
+    final fx0 = pairFully('c1');
+    final session = single<PhonePaired>(fx0).phone.session;
+    s.onDisconnect('c1');
+    final bad = s.onFrame('c2', Codec.encode(HelloMsg(pcId: 'other', pub: keys.pubSpkiB64, session: session)));
     expect(sent(bad), isA<UnknownMsg>());
     expect(bad.whereType<CloseConn>(), isNotEmpty);
   });
@@ -80,7 +142,8 @@ void main() {
     expect(s.onFrame('c1', ok), isEmpty);
     // and after a reconnect on a new socket
     s.onDisconnect('c1');
-    s.onFrame('c2', Codec.encode(HelloMsg(pcId: 'pc1', pub: keys.pubSpkiB64)));
+    final session = s.phone!.session;
+    s.onFrame('c2', Codec.encode(HelloMsg(pcId: 'pc1', pub: keys.pubSpkiB64, session: session)));
     expect(s.onFrame('c2', ok), isEmpty);
   });
 
@@ -94,11 +157,12 @@ void main() {
     expect(single<AuthResolved>(s.onFrame('c1', ok)).outcome, AuthOutcome.approved);
   });
 
-  test('bad signature → badSignature and id consumed', () {
+  test('bad signature → badSignature and id consumed; a second answer is then ignored', () {
     pairFully('c1');
     final (id, _) = s.requestAuth(label: 'x');
     final res = s.onFrame('c1', Codec.encode(AuthOkMsg(id: id, sig: keys.sign('other'))));
     expect(single<AuthResolved>(res).outcome, AuthOutcome.badSignature);
+    expect(s.onFrame('c1', Codec.encode(AuthOkMsg(id: id, sig: keys.sign('other')))), isEmpty);
   });
 
   test('denied maps reasons', () {
@@ -106,6 +170,15 @@ void main() {
     final (id, _) = s.requestAuth(label: 'x');
     final res = s.onFrame('c1', Codec.encode(AuthDeniedMsg(id: id, reason: DenyReason.biometricFailed)));
     expect(single<AuthResolved>(res).outcome, AuthOutcome.biometricFailed);
+  });
+
+  test('auth_denied from a non-phone connection closes and leaves the id pending', () {
+    pairFully('c1');
+    final (id, _) = s.requestAuth(label: 'x');
+    final res = s.onFrame('intruder', Codec.encode(AuthDeniedMsg(id: id, reason: DenyReason.user)));
+    expect(res.single, isA<CloseConn>());
+    final ok = s.onFrame('c1', Codec.encode(AuthDeniedMsg(id: id, reason: DenyReason.biometricFailed)));
+    expect(single<AuthResolved>(ok).outcome, AuthOutcome.biometricFailed);
   });
 
   test('tick expires pending auths', () {
@@ -116,6 +189,22 @@ void main() {
     expect(single<AuthResolved>(fx).id, id);
     expect(single<AuthResolved>(fx).outcome, AuthOutcome.timeout);
     expect(s.tick(), isEmpty);
+  });
+
+  test('tick clears an expired pairing token', () {
+    s.startPairing();
+    clock.now += 121;
+    s.tick();
+    expect(s.pairingToken, isNull);
+  });
+
+  test('an auth answer arriving after expiry resolves as timeout, not judged', () {
+    pairFully('c1');
+    final (id, fx) = s.requestAuth(label: 'x');
+    final frame = single<SendFrame>(fx).frame;
+    clock.now += 31;
+    final res = s.onFrame('c1', Codec.encode(AuthOkMsg(id: id, sig: keys.sign(frame))));
+    expect(single<AuthResolved>(res).outcome, AuthOutcome.timeout);
   });
 
   test('requestAuth without phone → noPhone', () {
@@ -133,5 +222,16 @@ void main() {
     pairFully('c1');
     expect(single<PhoneOnline>(s.onDisconnect('c1')).online, isFalse);
     expect(s.phoneOnline, isFalse);
+  });
+
+  test('re-pairing on a new connection closes the old phone conn and times out pending auths', () {
+    pairFully('c1');
+    final (id, _) = s.requestAuth(label: 'x');
+    final other = TestKeys();
+    final fx = pairFully('c2', withKeys: other, name: 'Other');
+    expect(fx.whereType<CloseConn>().map((c) => c.connId), contains('c1'));
+    final resolved = fx.whereType<AuthResolved>().where((a) => a.id == id).single;
+    expect(resolved.outcome, AuthOutcome.timeout);
+    expect(s.phoneOnline, isTrue);
   });
 }

@@ -45,8 +45,9 @@ final class _Pending {
 }
 
 final class _Candidate {
-  _Candidate(this.connId, this.name, this.pub, this.nonce);
+  _Candidate(this.connId, this.name, this.pub, this.nonce, this.exp);
   final String connId, name, pub, nonce;
+  final int exp;
 }
 
 final class DesktopSession {
@@ -119,6 +120,8 @@ final class DesktopSession {
       return false;
     });
     if (pairingToken != null && _pairingExp < now) pairingToken = null;
+    final cand = _cand;
+    if (cand != null && now > cand.exp) _cand = null;
     return fx;
   }
 
@@ -158,7 +161,7 @@ final class DesktopSession {
     }
     pairingToken = null;
     final nonce = _rand(32);
-    _cand = _Candidate(connId, m.name, m.pub, nonce);
+    _cand = _Candidate(connId, m.name, m.pub, nonce, _pairingExp);
     return [SendFrame(connId, Codec.encode(PairChallengeMsg(nonce: nonce)))];
   }
 
@@ -166,22 +169,35 @@ final class DesktopSession {
     final c = _cand;
     if (c == null || c.connId != connId) return [CloseConn(connId)];
     _cand = null;
+    if (_clock.nowSec() > c.exp) return [CloseConn(connId)];
     if (!_v.verify(pubSpkiB64: c.pub, payload: c.nonce, sigB64: m.sig)) {
       return [CloseConn(connId)];
     }
-    final paired = PairedPhone(name: c.name, pub: c.pub);
+    final session = rnd.randomB64Url(32);
+    final paired = PairedPhone(name: c.name, pub: c.pub, session: session);
     phone = paired;
+
+    final fx = <DesktopEffect>[];
+    final oldConn = _phoneConn;
+    if (oldConn != null && oldConn != connId) {
+      fx.add(CloseConn(oldConn));
+      for (final entry in _pending.entries) {
+        fx.add(AuthResolved(entry.key, entry.value.label, AuthOutcome.timeout));
+      }
+      _pending.clear();
+    }
     _phoneConn = connId;
-    return [
-      SendFrame(connId, Codec.encode(PairedMsg(pcId: pcId, name: pcName))),
+    fx.addAll([
+      SendFrame(connId, Codec.encode(PairedMsg(pcId: pcId, name: pcName, session: session))),
       PhonePaired(paired),
       const PhoneOnline(true),
-    ];
+    ]);
+    return fx;
   }
 
   List<DesktopEffect> _onHello(String connId, HelloMsg m) {
     final p = phone;
-    if (p == null || m.pub != p.pub || m.pcId != pcId) {
+    if (p == null || m.pub != p.pub || m.pcId != pcId || !_constantTimeEquals(m.session, p.session)) {
       return [SendFrame(connId, Codec.encode(const UnknownMsg())), CloseConn(connId)];
     }
     _phoneConn = connId;
@@ -205,6 +221,18 @@ final class DesktopSession {
     if (connId != _phoneConn) return [CloseConn(connId)];
     final p = _pending.remove(id);
     if (p == null) return const [];
+    if (_clock.nowSec() > p.exp) return [AuthResolved(id, p.label, AuthOutcome.timeout)];
     return [AuthResolved(id, p.label, judge(p))];
+  }
+
+  /// Compares two strings without leaking their length-independent equality
+  /// via early-exit timing. Requires equal length to be considered equal.
+  bool _constantTimeEquals(String a, String b) {
+    if (a.length != b.length) return false;
+    var diff = 0;
+    for (var i = 0; i < a.length; i++) {
+      diff |= a.codeUnitAt(i) ^ b.codeUnitAt(i);
+    }
+    return diff == 0;
   }
 }
