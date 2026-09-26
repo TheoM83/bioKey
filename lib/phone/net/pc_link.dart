@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:async/async.dart' show StreamQueue;
 import '../../core/pairing/qr_payload.dart';
 import '../../core/protocol/codec.dart';
 import '../../core/protocol/messages.dart';
@@ -31,6 +32,13 @@ abstract interface class PcLinkApi {
 /// else forwarded to [onEffect]), and reconnects with backoff on
 /// disconnect/failure. Emits [PhoneOnlineChanged] itself (the session never
 /// does) so callers can track connectivity without polling [online].
+///
+/// Lifecycle: every loop iteration is tagged with the generation it was
+/// started under (bumped by [start]); every resume point re-checks
+/// `_running` and its generation before touching shared state or the
+/// socket, so a `stop()` that races an in-flight connect can never leave an
+/// authenticated socket open or a second loop running after `start()` is
+/// called again.
 final class PcLink implements PcLinkApi {
   PcLink({
     required this.pc,
@@ -46,9 +54,9 @@ final class PcLink implements PcLinkApi {
 
   static Future<WebSocket> _defaultConnect(String h, int p, String fp) => connectPinned(host: h, port: p, fingerprint: fp);
 
-  /// The paired PC this link talks to. Mutated in place when mDNS resolves
-  /// a new host after the stored one stops answering; callers should read
-  /// this (e.g. to persist it) after a [PhonePairedWith] effect.
+  /// The paired PC this link talks to. Only updated once mDNS has resolved
+  /// a new host *and* a `welcome` has actually been received on it (see
+  /// [_pendingHost]) — never on the mere hope that a resolved host works.
   @override
   PairedPc pc;
   final PhoneSession _session;
@@ -62,48 +70,74 @@ final class PcLink implements PcLinkApi {
   @override
   bool online = false;
   int _attempt = 0;
+  int _gen = 0;
+  Future<void>? _loopFuture;
+
+  /// An mDNS-resolved host awaiting confirmation: connect attempts prefer
+  /// it over [pc]'s stored host, but it only overwrites [pc] (and gets
+  /// persisted via a [PhonePairedWith] effect) once a `welcome` actually
+  /// arrives on it — resolving a host is not proof it's reachable.
+  String? _pendingHost;
 
   @override
   Future<void> start() async {
     if (_running) return;
     _running = true;
-    unawaited(_loop());
+    final gen = ++_gen;
+    final future = _loop(gen);
+    _loopFuture = future;
+    unawaited(future);
   }
 
   @override
   Future<void> stop() async {
     _running = false;
     await _ws?.close();
+    final future = _loopFuture;
+    if (future != null) {
+      await future.timeout(const Duration(seconds: 6), onTimeout: () {});
+    }
     _ws = null;
+    _loopFuture = null;
   }
 
-  Future<void> _loop() async {
-    while (_running) {
+  bool _stale(int gen) => !_running || gen != _gen;
+
+  Future<void> _loop(int gen) async {
+    while (!_stale(gen)) {
+      WebSocket? ws;
       try {
-        final ws = await _connect(pc.host, pc.port, pc.fingerprint);
+        final host = _pendingHost ?? pc.host;
+        ws = await _connect(host, pc.port, pc.fingerprint);
+        if (_stale(gen)) return; // stop() raced the connect: close in finally, don't touch _ws.
         _ws = ws;
         _apply(await _session.hello(pc));
+        if (_stale(gen)) return;
         await for (final data in ws) {
-          if (!_running) break;
+          if (_stale(gen)) break;
           if (data is! String) break;
           final fx = await _session.onFrame(pc, data);
-          if (_isWelcome(data)) _markOnline();
+          if (_isWelcome(data)) _markOnline(host);
           _apply(fx);
+          if (_stale(gen)) break;
         }
       } on Object {
         // Connect or read failure: fall through to the backoff below.
+      } finally {
+        final leaked = ws;
+        if (leaked != null) {
+          unawaited(leaked.close());
+        }
+        if (identical(_ws, ws)) _ws = null;
       }
       _markOffline();
-      _ws = null;
-      if (!_running) break;
+      if (_stale(gen)) return;
       if (_attempt >= 1 && _resolve != null) {
         final h = await _resolve(pc.pcId);
-        if (h != null && h != pc.host) {
-          pc = PairedPc(pcId: pc.pcId, name: pc.name, host: h, port: pc.port, fingerprint: pc.fingerprint, session: pc.session);
-          onEffect(PhonePairedWith(pc));
-        }
+        if (_stale(gen)) return; // e.g. revoked while we were resolving.
+        if (h != null && h != pc.host) _pendingHost = h;
       }
-      if (!_running) break;
+      if (_stale(gen)) return;
       await Future<void>.delayed(_backoff(_attempt));
       _attempt++;
     }
@@ -117,12 +151,17 @@ final class PcLink implements PcLinkApi {
     }
   }
 
-  void _markOnline() {
+  void _markOnline(String connectedHost) {
     _attempt = 0;
     if (!online) {
       online = true;
       onEffect(PhoneOnlineChanged(pc.pcId, true));
     }
+    if (_pendingHost != null && _pendingHost == connectedHost && _pendingHost != pc.host) {
+      pc = PairedPc(pcId: pc.pcId, name: pc.name, host: _pendingHost!, port: pc.port, fingerprint: pc.fingerprint, session: pc.session);
+      onEffect(PhonePairedWith(pc));
+    }
+    _pendingHost = null;
   }
 
   void _markOffline() {
@@ -149,67 +188,98 @@ final class PcLink implements PcLinkApi {
   /// against [qr], resolves with the newly-[PairedPc] on `paired`, and
   /// throws (or rejects) on any failure — bad fingerprint, refused/closed
   /// connection, or a session that declines to complete pairing.
+  ///
+  /// Bounded by an overall 60 s timeout (closes the socket and rejects on
+  /// expiry). Frame handling is serialised through a [StreamQueue] (never
+  /// an un-awaited `async` listener callback), and the socket is always
+  /// closed — on success, on a refused/cancelled pairing, if
+  /// [PhoneSession.beginPairing] throws, or on a stream error.
   static Future<PairedPc> pair({
     required QrPayload qr,
     required PhoneSession session,
     required void Function(PhoneEffect) onEffect,
     Connect? connect,
   }) async {
-    final ws = await (connect ?? _defaultConnect)(qr.host, qr.port, qr.fingerprint);
-    // Only `pc.name` is read by the session before `paired` arrives (for the
-    // biometric prompt); the real session secret is not known until then.
-    final tmp = PairedPc(pcId: qr.pcId, name: qr.name, host: qr.host, port: qr.port, fingerprint: qr.fingerprint, session: '');
-    final done = Completer<PairedPc>();
-    late final StreamSubscription<Object?> sub;
+    WebSocket? ws;
+    try {
+      return await _pair(qr: qr, session: session, onEffect: onEffect, connect: connect, bindSocket: (w) => ws = w)
+          .timeout(const Duration(seconds: 60));
+    } finally {
+      // Covers the timeout path: `_pair`'s own try/finally already closes
+      // the socket on every path it controls, so this is a best-effort
+      // backstop for "the future never even got a chance to unwind" (the
+      // 60 s timeout abandons — but doesn't cancel — the original future).
+      unawaited(ws?.close());
+    }
+  }
 
-    // Stops listening and fully closes the (one-shot) pairing socket before
-    // resolving `done`: without this, a caller that immediately opens the
-    // real [PcLink] can race the desktop's disconnect handling for this
-    // connection — `WebSocket.close()` only waits for *our* sink to flush,
-    // not for the desktop to observe the disconnect, so the desktop can
-    // still briefly consider this now-defunct connection "the phone" and
-    // route frames (e.g. an auth request) to a socket nobody is reading
-    // anymore. The short grace delay gives the loopback FIN time to reach
-    // the desktop and its disconnect handler time to run before we hand
-    // back control.
-    Future<void> finish(void Function() complete) async {
-      await sub.cancel();
+  static Future<PairedPc> _pair({
+    required QrPayload qr,
+    required PhoneSession session,
+    required void Function(PhoneEffect) onEffect,
+    required void Function(WebSocket) bindSocket,
+    Connect? connect,
+  }) async {
+    final ws = await (connect ?? _defaultConnect)(qr.host, qr.port, qr.fingerprint);
+    bindSocket(ws);
+    final queue = StreamQueue<Object?>(ws);
+    var closed = false;
+    Future<void> closeWs() async {
+      if (closed) return;
+      closed = true;
       await ws.close();
-      await Future<void>.delayed(const Duration(milliseconds: 100));
-      complete();
     }
 
-    void apply(List<PhoneEffect> fx) {
-      for (final e in fx) {
-        switch (e) {
-          case PhoneSend():
-            ws.add(e.frame);
-          case PhoneClose():
-            unawaited(finish(() {
-              if (!done.isCompleted) done.completeError(StateError('appairage refusé'));
-            }));
-          case PhonePairedWith():
-            unawaited(finish(() {
-              if (!done.isCompleted) done.complete(e.pc);
-            }));
-          default:
-            onEffect(e);
+    try {
+      // Only `tmp.name` is read by the session before `paired` arrives (for
+      // the biometric prompt); the real session secret is not known until
+      // then.
+      final tmp = PairedPc(pcId: qr.pcId, name: qr.name, host: qr.host, port: qr.port, fingerprint: qr.fingerprint, session: '');
+
+      for (final e in await session.beginPairing(qr)) {
+        if (e is PhoneSend) ws.add(e.frame);
+      }
+
+      PairedPc? paired;
+      while (paired == null) {
+        if (!await queue.hasNext) {
+          throw StateError('connexion fermée pendant l’appairage');
+        }
+        final data = await queue.next;
+        if (data is! String) continue;
+        for (final e in await session.onFrame(tmp, data)) {
+          switch (e) {
+            case PhoneSend():
+              ws.add(e.frame);
+            case PhoneClose():
+              await closeWs();
+              throw StateError('appairage refusé');
+            case PhonePairedWith():
+              paired = e.pc;
+            default:
+              onEffect(e);
+          }
         }
       }
-    }
 
-    apply(await session.beginPairing(qr));
-    sub = ws.listen(
-      (Object? d) async {
-        if (d is String) apply(await session.onFrame(tmp, d));
-      },
-      onDone: () {
-        if (!done.isCompleted) done.completeError(StateError('connexion fermée pendant l’appairage'));
-      },
-      onError: (Object e) {
-        if (!done.isCompleted) done.completeError(e);
-      },
-    );
-    return done.future;
+      // Deterministic teardown: close, but keep draining the (uncancelled)
+      // queue so the peer's close echo is observed — the desktop runs its
+      // own `onDisconnect` in the same turn it sends that echo, so by the
+      // time this settles a caller that immediately opens a fresh [PcLink]
+      // can't race a stale "the phone is still on this now-defunct
+      // connection" state on the desktop. Bounded: a peer that never
+      // echoes the close still lets pairing succeed after 5 s.
+      unawaited(closeWs());
+      await Future(() async {
+        while (await queue.hasNext) {
+          await queue.next;
+        }
+      }).timeout(const Duration(seconds: 5), onTimeout: () {});
+      return paired;
+    } finally {
+      await closeWs();
+      final cancelled = queue.cancel(immediate: true);
+      if (cancelled != null) unawaited(cancelled.catchError((_) {}));
+    }
   }
 }
