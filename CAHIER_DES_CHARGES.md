@@ -147,7 +147,7 @@ MoSCoW : **M** indispensable v1 · **S** souhaitable · **C** plus tard.
 PC        affiche QR  biokey://pair?v=1&id=<pcId>&n=<nom>&h=<hôte>&p=<port>&fp=<sha256 cert b64url>&t=<jeton b64url>
 Téléphone → PC        {"type":"pair","v":1,"token":"…","name":"Nothing Phone","pub":"<SPKI b64>"}
 PC        → Téléphone {"type":"pair_challenge","nonce":"<32 o b64>"}
-Téléphone → PC        {"type":"pair_proof","sig":"<ECDSA b64>"}          (après empreinte)
+Téléphone → PC        {"type":"pair_proof","sig":"<ECDSA b64>"}          (après empreinte ; signe la chaîne "biokey-pair:" + nonce — séparation de domaine avec les trames auth)
 PC        → Téléphone {"type":"paired","pcId":"…","name":"PC-MAISON","session":"<32 o b64url>"}   (secret de session, stocké des deux côtés)
 ```
 
