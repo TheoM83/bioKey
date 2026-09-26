@@ -60,8 +60,9 @@ raccourci ».
 ### Sécurité en une phrase
 
 L'empreinte ne quitte jamais le téléphone ; seule une signature ECDSA
-voyage ; la connexion est un `wss://` dont le PC épingle le certificat via
-le QR ; la reconnexion utilise un secret de session remis une seule fois à
+voyage ; la connexion est en TLS brut dont le PC épingle le certificat via
+le QR — aucune bibliothèque réseau tierce : `dart:io` (TLS) + `pointycastle`
+seuls ; la reconnexion utilise un secret de session remis une seule fois à
 l'appairage. Détails et modèle de menace : [SECURITY.md](SECURITY.md).
 
 ### Construire soi-même
@@ -160,8 +161,9 @@ Tray icon → Open BioKey… → Apps tab → Add → "Create shortcut".
 ### Security in one sentence
 
 The fingerprint never leaves the phone; only an ECDSA signature travels;
-the connection is `wss://` with the PC's certificate pinned via the QR
-code; reconnection uses a session secret issued once at pairing time.
+the connection is raw pinned TLS with the PC's certificate pinned via the
+QR code — no third-party network library: `dart:io` (TLS) + `pointycastle`
+alone; reconnection uses a session secret issued once at pairing time.
 Details and threat model: [SECURITY.md](SECURITY.md).
 
 ### Build it yourself

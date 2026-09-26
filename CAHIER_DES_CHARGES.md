@@ -114,6 +114,7 @@ MoSCoW : **M** indispensable v1 · **S** souhaitable · **C** plus tard.
 | Langues | Français, anglais (fichiers ARB, 2 fichiers) |
 | Compatibilité | Android 10+ (cible 15) · Windows 10 22H2+ (cible 11) · macOS 13+ · Linux (GTK) · iOS 15+ |
 | Installation | Windows : MSIX signé ou exe portable · Android : APK · macOS : `.dmg` · Linux : AppImage · iOS : TestFlight/sideload |
+| Hors de chez soi | Pas de serveur BioKey sur Internet : via le tunnel de l'utilisateur (WireGuard/Tailscale), hôte modifiable par PC |
 
 ## 7. Sécurité
 
@@ -139,7 +140,7 @@ MoSCoW : **M** indispensable v1 · **S** souhaitable · **C** plus tard.
 - **Ce qui est signé** : SHA-256 des **octets exacts** du message `auth` tel qu'envoyé par le PC. Pas de canonicalisation JSON : le téléphone signe ce qu'il a reçu, le PC vérifie sur ce qu'il a envoyé.
 - **Vérification côté PC** : ECDSA P-256 / SHA-256 en Dart pur. Aucune dépendance native.
 
-### 7.3 Protocole (JSON sur WebSocket, `wss://`, version 1)
+### 7.3 Protocole (JSON en trames longueur-préfixées (4 octets big-endian + UTF-8, ≤ 64 Kio) sur TLS 1.2+ épinglé, version 1)
 
 **Appairage**
 
@@ -167,14 +168,14 @@ Règles : tout message inconnu ou malformé ferme la connexion. Toute signature 
 ## 8. Architecture et technologies
 
 ```
-┌──────────────────────────┐   wss:// TLS 1.3, cert épinglé   ┌──────────────────────────┐
-│  BioKey · rôle Téléphone │ ◄──────── WebSocket LAN ────────► │  BioKey · rôle Ordinateur│
+┌──────────────────────────┐   TLS brut 1.2+, cert épinglé   ┌──────────────────────────┐
+│  BioKey · rôle Téléphone │ ◄──────── trames TLS LAN ───────► │  BioKey · rôle Ordinateur│
 │  Android / iOS           │                                    │  Windows / macOS / Linux │
 │                          │   auth(id, nonce, label)           │                          │
-│  • Clé P-256 biométrique │ ◄───────────────────────────────── │  • Serveur wss + mDNS    │
+│  • Clé P-256 biométrique │ ◄───────────────────────────────── │  • Serveur TLS + UDP     │
 │  • Invite biométrique OS │   auth_ok(sig)                     │  • Vérif. ECDSA          │
 │  • Service + notif       │ ─────────────────────────────────► │  • Barre système         │
-│  • Scanner QR + mDNS     │                                    │  • Lanceur d'apps        │
+│  • Scanner QR + UDP      │                                    │  • Lanceur d'apps        │
 └──────────────────────────┘                                    └──────────────────────────┘
         même code Dart : protocole, modèles, stockage, i18n, thème
 ```
@@ -199,10 +200,9 @@ Compromis accepté : côté PC, l'UI n'est pas Fluent mais Material 3 aux couleu
 | Invite biométrique | fournie par le même plugin (BiometricPrompt / LocalAuthentication) | Android, iOS |
 | Scan QR | `mobile_scanner` | Android, iOS |
 | Affichage QR | `qr_flutter` | desktop |
-| mDNS (annonce + découverte) | `bonsoir` | toutes |
-| Transport | `dart:io` `HttpServer` + `SecurityContext` + `WebSocketTransformer` (PC), `WebSocket.connect` (téléphone) — **zéro dépendance** | toutes |
-| Certificat auto-signé | `basic_utils` (X509) ou `pointycastle` | desktop |
-| Vérification ECDSA | `pointycastle` (Dart pur) | desktop |
+| Découverte (annonce + recherche) | UDP broadcast `dart:io` (port 47623) — plus de mDNS | toutes |
+| Transport | `dart:io` `SecureServerSocket`/`SecureSocket` + trames longueur-préfixées — **zéro dépendance** | toutes |
+| Certificat auto-signé + vérification ECDSA | `pointycastle` (Dart pur) seul | desktop |
 | Stockage sécurisé | `flutter_secure_storage` (DPAPI / Keychain / libsecret / Keystore) | toutes |
 | Service premier plan | `flutter_foreground_task` | Android |
 | Notifications | `flutter_local_notifications` (mobile), `local_notifier` (desktop) | toutes |

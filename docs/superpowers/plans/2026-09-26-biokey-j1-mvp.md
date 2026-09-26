@@ -2743,6 +2743,8 @@ Tick each line in the checklist file with measured values:
 - Request from the lock screen → screen turns on, BioKey shows over the lock screen with the prompt.
 - Pair on a PC with WSL/Hyper-V installed → the QR carries the Wi-Fi/Ethernet address (not a vEthernet one); pairing succeeds.
 - Phone leaves the Wi-Fi abruptly (airplane mode) → PC tray shows « Téléphone hors ligne » within ~30 s (15 s WebSocket ping).
+- Change the PC's IP (reconnect Wi-Fi, or switch network) → discovery works after the PC changes IP: the phone finds it again without re-pairing.
+- Set a manual host on the phone pointing at the PC's WireGuard/Tailscale tunnel address, off the home LAN → manual host through Tailscale/WireGuard: the link connects over the tunnel.
 
 - [ ] **Step 4: Commit the filled checklist**
 
