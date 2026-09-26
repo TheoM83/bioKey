@@ -1,5 +1,10 @@
 const int protocolVersion = 1;
 
+/// Domain-separation prefix for the pairing proof (§7.3): the phone signs
+/// `pairProofDomain + nonce`, never the bare nonce, so a pairing signature
+/// can never be replayed as (or confused with) an `auth` frame signature.
+const String pairProofDomain = 'biokey-pair:';
+
 enum DenyReason {
   user('user'),
   timeout('timeout'),

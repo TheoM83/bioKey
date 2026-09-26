@@ -90,6 +90,8 @@ final class WsServer implements WsServerApi {
         case AuthResolved():
         case PhonePaired():
         case PhoneOnline():
+        case PairingExpired():
+        case PairingInvalid():
           break;
       }
       onEffect(e);

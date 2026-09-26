@@ -34,7 +34,9 @@ void main() {
     await s.beginPairing(qr);
     final fx = await s.onFrame(pc, Codec.encode(const PairChallengeMsg(nonce: 'NONCE')));
     final proof = sentOf(fx) as PairProofMsg;
-    expect(v.verify(pubSpkiB64: signer.keys.pubSpkiB64, payload: 'NONCE', sigB64: proof.sig), isTrue);
+    expect(v.verify(pubSpkiB64: signer.keys.pubSpkiB64, payload: 'biokey-pair:NONCE', sigB64: proof.sig), isTrue);
+    expect(v.verify(pubSpkiB64: signer.keys.pubSpkiB64, payload: 'NONCE', sigB64: proof.sig), isFalse,
+        reason: 'the proof is domain-separated, never over the bare nonce');
     expect(signer.prompts.single, 'Appairer avec PC ?');
     final done = await s.onFrame(pc, Codec.encode(const PairedMsg(pcId: 'pc1', name: 'PC-MAISON', session: 'newsess')));
     final paired = done.whereType<PhonePairedWith>().single.pc;
@@ -104,6 +106,34 @@ void main() {
     expect((sentOf(await s.onFrame(pc, frame)) as AuthDeniedMsg).reason, DenyReason.biometricFailed);
   });
 
+  test('prompt never shown in time (BiometricTimeout) → denied timeout', () async {
+    final frame = Codec.encode(const AuthMsg(id: 'u1', pcId: 'pc1', action: 'open', label: 'x', nonce: 'N', iat: 1000, exp: 1030));
+    signer.timeoutNext = true;
+    expect((sentOf(await s.onFrame(pc, frame)) as AuthDeniedMsg).reason, DenyReason.timeout);
+  });
+
+  test('clock skew is symmetric: a request up to 60 s past exp by our clock is still accepted', () async {
+    final behind = Codec.encode(const AuthMsg(id: 'u', pcId: 'pc1', action: 'open', label: 'x', nonce: 'N', iat: 950, exp: 980));
+    expect(sentOf(await s.onFrame(pc, behind)), isA<AuthOkMsg>());
+    final tooOld = Codec.encode(const AuthMsg(id: 'u', pcId: 'pc1', action: 'open', label: 'x', nonce: 'N', iat: 900, exp: 930));
+    expect((sentOf(await s.onFrame(pc, tooOld)) as AuthDeniedMsg).reason, DenyReason.timeout);
+  });
+
+  test('a close during pairing ends it: a later paired is refused', () async {
+    await s.beginPairing(qr);
+    expect((await s.onFrame(pc, 'garbage')).single, isA<PhoneClose>());
+    final fx = await s.onFrame(pc, Codec.encode(const PairedMsg(pcId: 'pc1', name: 'x', session: 's')));
+    expect(fx.whereType<PhonePairedWith>(), isEmpty);
+  });
+
+  test('cancelPairing ends the pairing: a later pair_challenge closes without prompting', () async {
+    await s.beginPairing(qr);
+    s.cancelPairing();
+    final fx = await s.onFrame(pc, Codec.encode(const PairChallengeMsg(nonce: 'N')));
+    expect(fx.single, isA<PhoneClose>());
+    expect(signer.prompts, isEmpty);
+  });
+
   test('an unexpected signer error during auth denies as biometric_failed', () async {
     final frame = Codec.encode(const AuthMsg(id: 'u1', pcId: 'pc1', action: 'open', label: 'x', nonce: 'N', iat: 1000, exp: 1030));
     signer.throwNext = true;
@@ -113,7 +143,7 @@ void main() {
   });
 
   test('expired, oversized window or foreign pcId → denied timeout without prompting', () async {
-    final expired = Codec.encode(const AuthMsg(id: 'u', pcId: 'pc1', action: 'open', label: 'x', nonce: 'N', iat: 900, exp: 990));
+    final expired = Codec.encode(const AuthMsg(id: 'u', pcId: 'pc1', action: 'open', label: 'x', nonce: 'N', iat: 900, exp: 930));
     final wide = Codec.encode(const AuthMsg(id: 'u', pcId: 'pc1', action: 'open', label: 'x', nonce: 'N', iat: 1000, exp: 1100));
     final foreign = Codec.encode(const AuthMsg(id: 'u', pcId: 'other', action: 'open', label: 'x', nonce: 'N', iat: 1000, exp: 1030));
     for (final f in [expired, wide, foreign]) {

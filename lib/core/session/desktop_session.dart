@@ -38,6 +38,20 @@ final class PhoneOnline extends DesktopEffect {
   final bool online;
 }
 
+/// The pairing QR currently shown can no longer succeed (its token expired,
+/// or the candidate that consumed it went away without completing): the UI
+/// should drop it so a fresh one can be generated.
+final class PairingExpired extends DesktopEffect {
+  const PairingExpired();
+}
+
+/// A phone presented this PC's id but a public key or session secret that
+/// no longer matches the stored pairing (e.g. biometric enrolment changed on
+/// the phone, invalidating its key): it must be re-paired from scratch.
+final class PairingInvalid extends DesktopEffect {
+  const PairingInvalid();
+}
+
 final class _Pending {
   _Pending(this.frame, this.exp, this.label);
   final String frame, label;
@@ -119,19 +133,50 @@ final class DesktopSession {
       }
       return false;
     });
-    if (pairingToken != null && _pairingExp < now) pairingToken = null;
+    if (pairingToken != null && _pairingExp < now) {
+      pairingToken = null;
+      fx.add(const PairingExpired());
+    }
     final cand = _cand;
-    if (cand != null && now > cand.exp) _cand = null;
+    if (cand != null && now > cand.exp) {
+      _cand = null;
+      fx.add(const PairingExpired());
+    }
+    return fx;
+  }
+
+  /// Forgets the paired phone: closes its live connection (if any), times
+  /// out every pending auth request and drops any in-flight pairing
+  /// candidate, so a revoked phone can't keep answering on a socket that
+  /// was authenticated before the revocation.
+  List<DesktopEffect> revoke() {
+    final fx = <DesktopEffect>[];
+    final conn = _phoneConn;
+    if (conn != null) fx.add(CloseConn(conn));
+    for (final entry in _pending.entries) {
+      fx.add(AuthResolved(entry.key, entry.value.label, AuthOutcome.timeout));
+    }
+    _pending.clear();
+    _phoneConn = null;
+    _cand = null;
+    phone = null;
+    if (conn != null) fx.add(const PhoneOnline(false));
     return fx;
   }
 
   List<DesktopEffect> onDisconnect(String connId) {
-    if (_cand?.connId == connId) _cand = null;
+    final fx = <DesktopEffect>[];
+    if (_cand?.connId == connId) {
+      // The token was already consumed by this candidate: the QR on screen
+      // is dead, let the UI offer a new one.
+      _cand = null;
+      fx.add(const PairingExpired());
+    }
     if (_phoneConn == connId) {
       _phoneConn = null;
-      return const [PhoneOnline(false)];
+      fx.add(const PhoneOnline(false));
     }
-    return const [];
+    return fx;
   }
 
   List<DesktopEffect> onFrame(String connId, String frame) {
@@ -169,9 +214,9 @@ final class DesktopSession {
     final c = _cand;
     if (c == null || c.connId != connId) return [CloseConn(connId)];
     _cand = null;
-    if (_clock.nowSec() > c.exp) return [CloseConn(connId)];
-    if (!_v.verify(pubSpkiB64: c.pub, payload: c.nonce, sigB64: m.sig)) {
-      return [CloseConn(connId)];
+    if (_clock.nowSec() > c.exp) return [CloseConn(connId), const PairingExpired()];
+    if (!_v.verify(pubSpkiB64: c.pub, payload: '$pairProofDomain${c.nonce}', sigB64: m.sig)) {
+      return [CloseConn(connId), const PairingExpired()];
     }
     final session = rnd.randomB64Url(32);
     final paired = PairedPhone(name: c.name, pub: c.pub, session: session);
@@ -198,7 +243,14 @@ final class DesktopSession {
   List<DesktopEffect> _onHello(String connId, HelloMsg m) {
     final p = phone;
     if (p == null || m.pub != p.pub || m.pcId != pcId || !_constantTimeEquals(m.session, p.session)) {
-      return [SendFrame(connId, Codec.encode(const UnknownMsg())), CloseConn(connId)];
+      return [
+        SendFrame(connId, Codec.encode(const UnknownMsg())),
+        CloseConn(connId),
+        // Our id, but not the key/secret we paired with: the phone we know
+        // has changed underneath us (e.g. re-enrolled fingerprints) and the
+        // user must re-pair — tell the UI instead of failing silently.
+        if (p != null && m.pcId == pcId) const PairingInvalid(),
+      ];
     }
     _phoneConn = connId;
     return [SendFrame(connId, Codec.encode(const WelcomeMsg())), const PhoneOnline(true)];

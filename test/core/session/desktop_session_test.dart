@@ -24,7 +24,7 @@ void main() {
     s.startPairing();
     final fx1 = s.onFrame(conn, Codec.encode(PairMsg(token: s.pairingToken!, name: name, pub: k.pubSpkiB64)));
     final ch = sent(fx1) as PairChallengeMsg;
-    return s.onFrame(conn, Codec.encode(PairProofMsg(sig: k.sign(ch.nonce))));
+    return s.onFrame(conn, Codec.encode(PairProofMsg(sig: k.sign('biokey-pair:${ch.nonce}'))));
   }
 
   test('full pairing succeeds and phone becomes online', () {
@@ -56,14 +56,16 @@ void main() {
     final tok = s.pairingToken!;
     final fx1 = s.onFrame('c1', Codec.encode(PairMsg(token: tok, name: 'n', pub: keys.pubSpkiB64)));
     final ch = sent(fx1) as PairChallengeMsg;
-    s.onFrame('c1', Codec.encode(PairProofMsg(sig: keys.sign(ch.nonce))));
+    s.onFrame('c1', Codec.encode(PairProofMsg(sig: keys.sign('biokey-pair:${ch.nonce}'))));
     expect(s.onFrame('c2', Codec.encode(PairMsg(token: tok, name: 'n', pub: 'p'))).single, isA<CloseConn>());
   });
 
   test('bad pair_proof signature closes', () {
     s.startPairing();
     s.onFrame('c1', Codec.encode(PairMsg(token: s.pairingToken!, name: 'n', pub: keys.pubSpkiB64)));
-    expect(s.onFrame('c1', Codec.encode(const PairProofMsg(sig: 'AAAA'))).single, isA<CloseConn>());
+    final fx = s.onFrame('c1', Codec.encode(const PairProofMsg(sig: 'AAAA')));
+    expect(fx.whereType<CloseConn>(), hasLength(1));
+    expect(fx.whereType<PairingExpired>(), hasLength(1));
   });
 
   test('pair_proof from a connection other than the candidate closes', () {
@@ -77,15 +79,15 @@ void main() {
     final fx1 = s.onFrame('c1', Codec.encode(PairMsg(token: s.pairingToken!, name: 'n', pub: keys.pubSpkiB64)));
     final ch = sent(fx1) as PairChallengeMsg;
     s.startPairing();
-    expect(s.onFrame('c1', Codec.encode(PairProofMsg(sig: keys.sign(ch.nonce)))).single, isA<CloseConn>());
+    expect(s.onFrame('c1', Codec.encode(PairProofMsg(sig: keys.sign('biokey-pair:${ch.nonce}')))).single, isA<CloseConn>());
   });
 
   test('candidate disconnecting then sending pair_proof closes', () {
     s.startPairing();
     final fx1 = s.onFrame('c1', Codec.encode(PairMsg(token: s.pairingToken!, name: 'n', pub: keys.pubSpkiB64)));
     final ch = sent(fx1) as PairChallengeMsg;
-    s.onDisconnect('c1');
-    expect(s.onFrame('c1', Codec.encode(PairProofMsg(sig: keys.sign(ch.nonce)))).single, isA<CloseConn>());
+    expect(s.onDisconnect('c1').whereType<PairingExpired>(), hasLength(1), reason: 'the consumed QR is dead');
+    expect(s.onFrame('c1', Codec.encode(PairProofMsg(sig: keys.sign('biokey-pair:${ch.nonce}')))).single, isA<CloseConn>());
   });
 
   test('pair_proof after the pairing candidate expires closes', () {
@@ -93,7 +95,7 @@ void main() {
     final fx1 = s.onFrame('c1', Codec.encode(PairMsg(token: s.pairingToken!, name: 'n', pub: keys.pubSpkiB64)));
     final ch = sent(fx1) as PairChallengeMsg;
     clock.now += 121;
-    expect(s.onFrame('c1', Codec.encode(PairProofMsg(sig: keys.sign(ch.nonce)))).single, isA<CloseConn>());
+    expect(s.onFrame('c1', Codec.encode(PairProofMsg(sig: keys.sign('biokey-pair:${ch.nonce}')))).first, isA<CloseConn>());
   });
 
   test('hello with known pub and session → welcome; unknown pub → unknown + close', () {
@@ -191,11 +193,57 @@ void main() {
     expect(s.tick(), isEmpty);
   });
 
-  test('tick clears an expired pairing token', () {
+  test('tick clears an expired pairing token and emits PairingExpired once', () {
     s.startPairing();
     clock.now += 121;
-    s.tick();
+    expect(s.tick().whereType<PairingExpired>(), hasLength(1));
     expect(s.pairingToken, isNull);
+    expect(s.tick(), isEmpty);
+  });
+
+  test('tick emits PairingExpired when a candidate that consumed the token expires', () {
+    s.startPairing();
+    s.onFrame('c1', Codec.encode(PairMsg(token: s.pairingToken!, name: 'n', pub: keys.pubSpkiB64)));
+    expect(s.pairingToken, isNull);
+    clock.now += 121;
+    expect(s.tick().whereType<PairingExpired>(), hasLength(1));
+    expect(s.tick(), isEmpty);
+  });
+
+  test('a proof over the bare nonce (no domain prefix) is rejected', () {
+    s.startPairing();
+    final fx1 = s.onFrame('c1', Codec.encode(PairMsg(token: s.pairingToken!, name: 'n', pub: keys.pubSpkiB64)));
+    final ch = sent(fx1) as PairChallengeMsg;
+    final fx = s.onFrame('c1', Codec.encode(PairProofMsg(sig: keys.sign(ch.nonce))));
+    expect(fx.whereType<PhonePaired>(), isEmpty);
+    expect(fx.whereType<CloseConn>(), hasLength(1));
+  });
+
+  test('revoke closes the phone connection, times out pending auths and forgets the phone', () {
+    pairFully('c1');
+    final (id, _) = s.requestAuth(label: 'x');
+    final fx = s.revoke();
+    expect(single<CloseConn>(fx).connId, 'c1');
+    expect(single<AuthResolved>(fx).id, id);
+    expect(single<AuthResolved>(fx).outcome, AuthOutcome.timeout);
+    expect(single<PhoneOnline>(fx).online, isFalse);
+    expect(s.phone, isNull);
+    expect(s.phoneOnline, isFalse);
+    final (_, after) = s.requestAuth(label: 'y');
+    expect(single<AuthResolved>(after).outcome, AuthOutcome.noPhone);
+  });
+
+  test('hello with our pcId but a changed pub or session → unknown + close + PairingInvalid', () {
+    final fx0 = pairFully('c1');
+    final session = single<PhonePaired>(fx0).phone.session;
+    s.onDisconnect('c1');
+    final newKey = s.onFrame('c2', Codec.encode(HelloMsg(pcId: 'pc1', pub: TestKeys().pubSpkiB64, session: session)));
+    expect(sent(newKey), isA<UnknownMsg>());
+    expect(newKey.whereType<PairingInvalid>(), hasLength(1));
+    final newSession = s.onFrame('c3', Codec.encode(HelloMsg(pcId: 'pc1', pub: keys.pubSpkiB64, session: 'WRONG')));
+    expect(newSession.whereType<PairingInvalid>(), hasLength(1));
+    final otherPc = s.onFrame('c4', Codec.encode(HelloMsg(pcId: 'other', pub: keys.pubSpkiB64, session: session)));
+    expect(otherPc.whereType<PairingInvalid>(), isEmpty, reason: 'not our pairing to invalidate');
   });
 
   test('an auth answer arriving after expiry resolves as timeout, not judged', () {

@@ -41,7 +41,7 @@ void main() {
     final inbox = StreamQueue<String>(ws.map((e) => e as String));
     ws.add(Codec.encode(PairMsg(token: session.pairingToken!, name: 'Fake', pub: keys.pubSpkiB64)));
     final ch = Codec.decode(await inbox.next) as PairChallengeMsg;
-    ws.add(Codec.encode(PairProofMsg(sig: keys.sign(ch.nonce))));
+    ws.add(Codec.encode(PairProofMsg(sig: keys.sign('biokey-pair:${ch.nonce}'))));
     expect(Codec.decode(await inbox.next), isA<PairedMsg>());
     expect(session.phoneOnline, isTrue);
 

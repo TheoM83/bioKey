@@ -4,7 +4,7 @@ import 'test_keys.dart';
 class FakeSigner implements BiometricSigner {
   final keys = TestKeys();
   final prompts = <String>[];
-  bool cancelNext = false, failNext = false, throwNext = false;
+  bool cancelNext = false, failNext = false, throwNext = false, timeoutNext = false;
   int deleteCalls = 0;
 
   @override
@@ -20,6 +20,10 @@ class FakeSigner implements BiometricSigner {
     if (failNext) {
       failNext = false;
       throw BiometricFailed('lockout');
+    }
+    if (timeoutNext) {
+      timeoutNext = false;
+      throw BiometricTimeout('application en arrière-plan');
     }
     if (throwNext) {
       throwNext = false;

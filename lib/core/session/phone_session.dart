@@ -67,7 +67,18 @@ final class PhoneSession {
     return [PhoneSend(Codec.encode(HelloMsg(pcId: pc.pcId, pub: pub, session: pc.session)))];
   }
 
+  /// Abandons an in-flight pairing (the caller timed out or its socket
+  /// failed): a later `pair_challenge`/`paired` must no longer be honoured.
+  void cancelPairing() => _pairingQr = null;
+
   Future<List<PhoneEffect>> onFrame(PairedPc pc, String frame) async {
+    final fx = await _onFrame(pc, frame);
+    // Any close ends whatever pairing this connection was carrying.
+    if (fx.any((e) => e is PhoneClose)) _pairingQr = null;
+    return fx;
+  }
+
+  Future<List<PhoneEffect>> _onFrame(PairedPc pc, String frame) async {
     final Message m;
     try {
       m = Codec.decode(frame);
@@ -97,7 +108,7 @@ final class PhoneSession {
     // us to sign anything. Refuse without prompting the user.
     if (_pairingQr == null) return const [PhoneClose()];
     try {
-      final sig = await _signer.sign(payload: m.nonce, prompt: 'Appairer avec ${pc.name} ?');
+      final sig = await _signer.sign(payload: '$pairProofDomain${m.nonce}', prompt: 'Appairer avec ${pc.name} ?');
       return [PhoneSend(Codec.encode(PairProofMsg(sig: sig)))];
     } on BiometricCancelled {
       _pairingQr = null;
@@ -136,8 +147,10 @@ final class PhoneSession {
         m.action == 'open' &&
         m.exp >= m.iat &&
         m.exp - m.iat <= authTtl &&
+        // Symmetric skew allowance: the PC's clock may run ahead of or
+        // behind ours by up to a minute.
         m.iat <= now + clockSkewAllowance &&
-        now <= m.exp;
+        now <= m.exp + clockSkewAllowance;
     if (!fresh) {
       return [PhoneSend(Codec.encode(AuthDeniedMsg(id: m.id, reason: DenyReason.timeout)))];
     }
@@ -153,6 +166,8 @@ final class PhoneSession {
       return [shown, PhoneSend(Codec.encode(AuthOkMsg(id: m.id, sig: sig)))];
     } on BiometricCancelled {
       return [shown, PhoneSend(Codec.encode(AuthDeniedMsg(id: m.id, reason: DenyReason.user)))];
+    } on BiometricTimeout {
+      return [shown, PhoneSend(Codec.encode(AuthDeniedMsg(id: m.id, reason: DenyReason.timeout)))];
     } on BiometricFailed {
       return [shown, PhoneSend(Codec.encode(AuthDeniedMsg(id: m.id, reason: DenyReason.biometricFailed)))];
     } on Object {
