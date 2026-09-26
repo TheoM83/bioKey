@@ -15,7 +15,7 @@ import 'apps/protected_app.dart';
 import 'notify.dart';
 import 'server/lan.dart';
 import 'server/mdns_advertiser.dart';
-import 'server/ws_server.dart';
+import 'server/tls_server.dart';
 
 /// Wires the pure [DesktopSession] state machine to the [WsServerApi],
 /// [AppStore], [AppLauncher] and [Notifier], and exposes the desktop role's
@@ -117,7 +117,7 @@ final class DesktopController extends ChangeNotifier {
     _online = false;
     _session = DesktopSession(pcId: _identity.pcId, pcName: pcName, verifier: _verifier, clock: _clock, phone: _phone);
 
-    final factory = _serverFactory ?? (DesktopIdentity id, DesktopSession s, void Function(DesktopEffect) onEffect) => WsServer(identity: id, session: s, onEffect: onEffect);
+    final factory = _serverFactory ?? (DesktopIdentity id, DesktopSession s, void Function(DesktopEffect) onEffect) => TlsServer(identity: id, session: s, onEffect: onEffect);
     _server = factory(_identity, _session, _onEffect);
     _serverCreated = true;
     await _server.start(port: await _store.port());

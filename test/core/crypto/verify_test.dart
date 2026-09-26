@@ -116,6 +116,13 @@ void main() {
     );
   });
 
+  test('a negative r or s in the DER signature is rejected', () {
+    final negR = ASN1Sequence(elements: [ASN1Integer(BigInt.from(-1)), ASN1Integer(BigInt.one)]).encode();
+    expect(v.verify(pubSpkiB64: keys.pubSpkiB64, payload: payload, sigB64: base64Encode(negR)), isFalse);
+    final negS = ASN1Sequence(elements: [ASN1Integer(BigInt.one), ASN1Integer(BigInt.from(-1))]).encode();
+    expect(v.verify(pubSpkiB64: keys.pubSpkiB64, payload: payload, sigB64: base64Encode(negS)), isFalse);
+  });
+
   test('randomB64 yields requested byte length and differs each call', () {
     final a = randomB64(32);
     final b = randomB64(32);

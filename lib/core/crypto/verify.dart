@@ -74,6 +74,8 @@ final class EcdsaVerifier implements Verifier {
     final rObj = sigSeq.elements![0];
     final sObj = sigSeq.elements![1];
     if (rObj is! ASN1Integer || sObj is! ASN1Integer) return null;
-    return ECSignature(rObj.integer!, sObj.integer!);
+    final r = rObj.integer!, s = sObj.integer!;
+    if (r.isNegative || s.isNegative) return null;
+    return ECSignature(r, s);
   }
 }

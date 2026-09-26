@@ -10,7 +10,7 @@ import 'package:biokey/desktop/apps/app_store.dart';
 import 'package:biokey/desktop/apps/launcher.dart';
 import 'package:biokey/desktop/desktop_controller.dart';
 import 'package:biokey/desktop/notify.dart';
-import 'package:biokey/desktop/server/ws_server.dart';
+import 'package:biokey/desktop/server/tls_server.dart';
 import '../support/test_keys.dart';
 
 void main() {

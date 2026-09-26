@@ -3,12 +3,13 @@ import 'dart:io';
 import 'package:async/async.dart' show StreamQueue;
 import '../../core/pairing/qr_payload.dart';
 import '../../core/protocol/codec.dart';
+import '../../core/protocol/framing.dart';
 import '../../core/protocol/messages.dart';
 import '../../core/session/phone_session.dart';
 import '../../core/storage/phone_store.dart';
 import 'pinned_socket.dart';
 
-typedef Connect = Future<WebSocket> Function(String host, int port, String fp);
+typedef Connect = Future<SecureSocket> Function(String host, int port, String fp);
 typedef Backoff = Duration Function(int attempt);
 
 /// 1, 2, 4, 8, 15, 30 s, then capped at 30 s.
@@ -16,7 +17,7 @@ Duration defaultBackoff(int attempt) => Duration(seconds: const [1, 2, 4, 8, 15,
 
 /// The operations [PhoneController] needs from a PC link, extracted so
 /// tests can inject a fake instead of a real (pinned-TLS) socket — mirrors
-/// [WsServerApi] on the desktop side.
+/// [LinkServerApi] on the desktop side.
 abstract interface class PcLinkApi {
   PairedPc get pc;
   bool get online;
@@ -24,7 +25,9 @@ abstract interface class PcLinkApi {
   Future<void> stop();
 }
 
-/// One reconnecting WebSocket link between the phone and a single paired PC.
+/// One reconnecting pinned-TLS link between the phone and a single paired
+/// PC, carrying length-prefixed JSON frames (`framing.dart`) over a raw
+/// socket.
 ///
 /// Drives the pure [PhoneSession] state machine against a real (pinned-TLS)
 /// socket: connects, sends `hello`, applies every effect the session emits
@@ -32,6 +35,13 @@ abstract interface class PcLinkApi {
 /// else forwarded to [onEffect]), and reconnects with backoff on
 /// disconnect/failure. Emits [PhoneOnlineChanged] itself (the session never
 /// does) so callers can track connectivity without polling [online].
+///
+/// Transport liveness (replaces transport-level ping/pong, e.g. a
+/// WebSocket's): a protocol
+/// `ping` is sent every [pingInterval] the connection has otherwise been
+/// idle, and the connection is closed if no frame at all (in either
+/// direction is received) for [livenessTimeout] — mirrors the equivalent
+/// rule on [TlsServer].
 ///
 /// Lifecycle: every loop iteration is tagged with the generation it was
 /// started under (bumped by [start]); every resume point re-checks
@@ -52,7 +62,10 @@ final class PcLink implements PcLinkApi {
         _resolve = resolveHost,
         _backoff = backoff ?? defaultBackoff;
 
-  static Future<WebSocket> _defaultConnect(String h, int p, String fp) => connectPinned(host: h, port: p, fingerprint: fp);
+  static const pingInterval = Duration(seconds: 30);
+  static const livenessTimeout = Duration(seconds: 60);
+
+  static Future<SecureSocket> _defaultConnect(String h, int p, String fp) => connectPinned(host: h, port: p, fingerprint: fp);
 
   /// The paired PC this link talks to. Only updated once mDNS has resolved
   /// a new host *and* a `welcome` has actually been received on it (see
@@ -65,7 +78,7 @@ final class PcLink implements PcLinkApi {
   final Future<String?> Function(String)? _resolve;
   final Backoff _backoff;
 
-  WebSocket? _ws;
+  SecureSocket? _ws;
   bool _running = false;
   @override
   bool online = false;
@@ -93,6 +106,11 @@ final class PcLink implements PcLinkApi {
   String? _pendingHost;
   bool _preferPending = true;
 
+  /// Last time a frame was sent/received on the current socket; drives the
+  /// idle-ping and liveness-close rules. Reset for each new connection.
+  DateTime _lastSentAt = DateTime.now();
+  DateTime _lastRecvAt = DateTime.now();
+
   @override
   Future<void> start() async {
     if (_running) return;
@@ -107,7 +125,7 @@ final class PcLink implements PcLinkApi {
   Future<void> stop() async {
     _running = false;
     _wakeCompleter?.complete();
-    await _ws?.close();
+    _ws?.destroy();
     final future = _loopFuture;
     if (future != null) {
       await future.timeout(const Duration(seconds: 6), onTimeout: () {});
@@ -158,7 +176,8 @@ final class PcLink implements PcLinkApi {
 
   Future<void> _loop(int gen) async {
     while (!_stale(gen)) {
-      WebSocket? ws;
+      SecureSocket? ws;
+      Timer? liveness;
       try {
         final host = (_pendingHost != null && _preferPending) ? _pendingHost! : pc.host;
         ws = await _connect(host, pc.port, pc.fingerprint);
@@ -166,15 +185,39 @@ final class PcLink implements PcLinkApi {
         _ws = ws;
         _apply(await _session.hello(pc), ws, gen);
         if (_stale(gen)) return;
+        final socket = ws;
+        _lastSentAt = DateTime.now();
+        _lastRecvAt = DateTime.now();
+        // A silent Wi-Fi drop leaves a TCP socket that never sees a
+        // FIN/RST; this liveness timer forces the connection to close
+        // (ending the `await for` below) within a bounded time instead of
+        // hanging forever, and keeps a genuinely idle link alive with a
+        // protocol ping so the PC's own liveness rule doesn't close it.
+        liveness = Timer.periodic(const Duration(seconds: 1), (_) {
+          if (_stale(gen)) return;
+          final now = DateTime.now();
+          if (now.difference(_lastRecvAt) >= livenessTimeout) {
+            socket.destroy();
+            return;
+          }
+          if (now.difference(_lastSentAt) >= pingInterval) {
+            try {
+              socket.add(encodeFrame(Codec.encode(const PingMsg())));
+              _lastSentAt = now;
+            } on Object {
+              // Socket already closed underneath us: the read loop will
+              // notice and reconnect.
+            }
+          }
+        });
         // The socket is read continuously — never paused while a frame is
-        // being handled — so WebSocket-level pings keep being answered
+        // being handled — so the liveness ping keeps being sent/answered
         // during a (possibly long) biometric prompt; frames themselves are
         // still handled strictly in order through [chain].
         var chain = Future<void>.value();
-        final socket = ws;
-        await for (final data in socket) {
+        await for (final data in FrameDecoder().bind(socket)) {
           if (_stale(gen)) break;
-          if (data is! String) break;
+          _lastRecvAt = DateTime.now();
           chain = chain.then((_) => _handle(data, socket, host, gen));
         }
         // That connect attempt is now settled (success or failure): the
@@ -185,9 +228,10 @@ final class PcLink implements PcLinkApi {
       } on Object {
         if (_pendingHost != null) _preferPending = !_preferPending;
       } finally {
+        liveness?.cancel();
         final leaked = ws;
         if (leaked != null) {
-          unawaited(leaked.close());
+          leaked.destroy();
         }
         if (identical(_ws, ws)) _ws = null;
       }
@@ -212,7 +256,7 @@ final class PcLink implements PcLinkApi {
     }
   }
 
-  Future<void> _handle(String data, WebSocket ws, String host, int gen) async {
+  Future<void> _handle(String data, SecureSocket ws, String host, int gen) async {
     if (_stale(gen)) return;
     try {
       final fx = await _session.onFrame(pc, data);
@@ -261,18 +305,19 @@ final class PcLink implements PcLinkApi {
   /// to a newer generation by the time a stale one's `onFrame` — e.g. a
   /// slow biometric sign — finally resolves) and drops every effect
   /// outright once stale, instead of forwarding them to [onEffect].
-  void _apply(List<PhoneEffect> fx, WebSocket ws, int gen) {
+  void _apply(List<PhoneEffect> fx, SecureSocket ws, int gen) {
     if (_stale(gen)) return;
     for (final e in fx) {
       switch (e) {
         case PhoneSend():
           try {
-            ws.add(e.frame);
+            ws.add(encodeFrame(e.frame));
+            _lastSentAt = DateTime.now();
           } on Object {
             // Socket already closed underneath us: the reconnect loop owns it.
           }
         case PhoneClose():
-          unawaited(ws.close());
+          ws.destroy();
         default:
           onEffect(e);
       }
@@ -302,7 +347,7 @@ final class PcLink implements PcLinkApi {
     Connect? connect,
     Future<String?> Function(String pcId)? resolveHost,
   }) async {
-    WebSocket? ws;
+    SecureSocket? ws;
     var cancelled = false;
     final attempt = _pair(
       qr: qr,
@@ -329,7 +374,7 @@ final class PcLink implements PcLinkApi {
       // on its side after the phone already reported failure to its
       // caller.
       cancelled = true;
-      unawaited(ws?.close());
+      ws?.destroy();
       // The abandoned attempt still runs to completion internally (Dart's
       // Future.timeout doesn't cancel it); observe its eventual result so
       // it doesn't surface as an unhandled zone error once `cancelled`
@@ -342,14 +387,14 @@ final class PcLink implements PcLinkApi {
     required QrPayload qr,
     required PhoneSession session,
     required void Function(PhoneEffect) onEffect,
-    required void Function(WebSocket) bindSocket,
+    required void Function(SecureSocket) bindSocket,
     required bool Function() isCancelled,
     Connect? connect,
     Future<String?> Function(String pcId)? resolveHost,
   }) async {
     final doConnect = connect ?? _defaultConnect;
     var host = qr.host;
-    WebSocket ws;
+    SecureSocket ws;
     try {
       ws = await doConnect(host, qr.port, qr.fingerprint);
     } on Object {
@@ -365,11 +410,11 @@ final class PcLink implements PcLinkApi {
     }
     // Buffer through a controller so the socket itself is never paused
     // while we wait on the fingerprint prompt (a StreamQueue pauses its
-    // source between requests), which would stop WebSocket pings from
-    // being answered and let the PC drop us mid-pairing.
-    final inbox = StreamController<Object?>();
-    final sub = ws.listen(inbox.add, onError: inbox.addError, onDone: () => unawaited(inbox.close()));
-    final queue = StreamQueue<Object?>(inbox.stream);
+    // source between requests), which would stop it from noticing a close
+    // and let the PC drop us mid-pairing.
+    final inbox = StreamController<String>();
+    final sub = FrameDecoder().bind(ws).listen(inbox.add, onError: inbox.addError, onDone: () => unawaited(inbox.close()));
+    final queue = StreamQueue<String>(inbox.stream);
     var closed = false;
     Future<void> closeWs() async {
       if (closed) return;
@@ -384,7 +429,7 @@ final class PcLink implements PcLinkApi {
       final tmp = PairedPc(pcId: qr.pcId, name: qr.name, host: host, port: qr.port, fingerprint: qr.fingerprint, session: '');
 
       for (final e in await session.beginPairing(qr)) {
-        if (e is PhoneSend) ws.add(e.frame);
+        if (e is PhoneSend) ws.add(encodeFrame(e.frame));
       }
 
       PairedPc? paired;
@@ -393,11 +438,10 @@ final class PcLink implements PcLinkApi {
           throw StateError('connexion fermée pendant l’appairage');
         }
         final data = await queue.next;
-        if (data is! String) continue;
         for (final e in await session.onFrame(tmp, data)) {
           switch (e) {
             case PhoneSend():
-              ws.add(e.frame);
+              ws.add(encodeFrame(e.frame));
             case PhoneClose():
               await closeWs();
               throw StateError('appairage refusé');

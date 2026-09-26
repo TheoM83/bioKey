@@ -36,8 +36,9 @@ typedef WsServerApi = LinkServerApi;
 /// once it has been sent a `pair_challenge`, since the user is then looking
 /// at a fingerprint prompt — and, once authenticated, a socket that has sent
 /// no frame at all for [livenessTimeout] is closed too. That liveness rule
-/// replaces WebSocket-level ping/pong: the phone sends a protocol `ping`
-/// every 30 s when otherwise idle, which is enough to keep resetting it.
+/// replaces transport-level (e.g. WebSocket) ping/pong: the phone sends a
+/// protocol `ping` every 30 s when otherwise idle, which is enough to keep
+/// resetting it.
 final class TlsServer implements LinkServerApi {
   TlsServer({
     required this.identity,

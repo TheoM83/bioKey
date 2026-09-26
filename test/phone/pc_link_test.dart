@@ -6,7 +6,7 @@ import 'package:biokey/core/pairing/qr_payload.dart';
 import 'package:biokey/core/session/clock.dart';
 import 'package:biokey/core/session/desktop_session.dart';
 import 'package:biokey/core/session/phone_session.dart';
-import 'package:biokey/desktop/server/ws_server.dart';
+import 'package:biokey/desktop/server/tls_server.dart';
 import 'package:biokey/phone/net/pc_link.dart';
 import 'package:biokey/phone/net/pinned_socket.dart';
 import '../support/fake_signer.dart';
@@ -14,14 +14,14 @@ import '../support/fake_signer.dart';
 void main() {
   late DesktopIdentity id;
   late DesktopSession ds;
-  late WsServer server;
+  late TlsServer server;
   final desktopFx = <DesktopEffect>[];
 
   setUp(() async {
     id = generateDesktopIdentity(pcName: 'PC');
     ds = DesktopSession(pcId: id.pcId, pcName: 'PC', verifier: const EcdsaVerifier(), clock: const SystemClock());
     desktopFx.clear();
-    server = WsServer(identity: id, session: ds, onEffect: desktopFx.add);
+    server = TlsServer(identity: id, session: ds, onEffect: desktopFx.add);
     await server.start(address: '127.0.0.1', port: 0);
   });
   tearDown(() => server.stop());
@@ -50,7 +50,7 @@ void main() {
     final port = server.port;
     await server.stop();
     await _until(() => !link.online);
-    server = WsServer(identity: id, session: ds, onEffect: desktopFx.add);
+    server = TlsServer(identity: id, session: ds, onEffect: desktopFx.add);
     await server.start(address: '127.0.0.1', port: port);
     await _until(() => ds.phoneOnline, timeout: const Duration(seconds: 10));
     await link.stop();
@@ -70,7 +70,7 @@ void main() {
     final paired = await PcLink.pair(qr: qr, session: ps, onEffect: (_) {}).timeout(const Duration(seconds: 5));
 
     var connectCalls = 0;
-    Future<WebSocket> slowConnect(String h, int p, String fp) async {
+    Future<SecureSocket> slowConnect(String h, int p, String fp) async {
       connectCalls++;
       await Future<void>.delayed(const Duration(milliseconds: 300));
       return connectPinned(host: h, port: p, fingerprint: fp);
@@ -108,8 +108,8 @@ void main() {
     // this test slow/flaky) — everything else still goes through the real
     // connectPinned, so the stored (real) host genuinely round-trips.
     const bogusHost = 'bogus.invalid';
-    Future<WebSocket> fastFailingConnect(String h, int p, String fp) {
-      if (h == bogusHost) return Future<WebSocket>.error(const SocketException('refused'));
+    Future<SecureSocket> fastFailingConnect(String h, int p, String fp) {
+      if (h == bogusHost) return Future<SecureSocket>.error(const SocketException('refused'));
       return connectPinned(host: h, port: p, fingerprint: fp);
     }
 
@@ -143,7 +143,7 @@ void main() {
     // stored host is reachable again.
     await _until(() => resolvedHosts.length >= 2, timeout: const Duration(seconds: 5));
 
-    server = WsServer(identity: id, session: ds, onEffect: desktopFx.add);
+    server = TlsServer(identity: id, session: ds, onEffect: desktopFx.add);
     await server.start(address: '127.0.0.1', port: port);
     await _until(() => ds.phoneOnline, timeout: const Duration(seconds: 10));
 
@@ -156,9 +156,9 @@ void main() {
     ds.startPairing();
     final qr = QrPayload(pcId: id.pcId, name: 'PC', host: 'unreachable.invalid', port: server.port, fingerprint: id.fingerprintB64Url, token: ds.pairingToken!);
     final tried = <String>[];
-    Future<WebSocket> connect(String h, int p, String fp) {
+    Future<SecureSocket> connect(String h, int p, String fp) {
       tried.add(h);
-      if (h == 'unreachable.invalid') return Future<WebSocket>.error(const SocketException('unreachable'));
+      if (h == 'unreachable.invalid') return Future<SecureSocket>.error(const SocketException('unreachable'));
       return connectPinned(host: h, port: p, fingerprint: fp);
     }
 
@@ -183,14 +183,14 @@ void main() {
   test('pairing fails when the QR host is unreachable and mDNS finds nothing', () async {
     ds.startPairing();
     final qr = QrPayload(pcId: id.pcId, name: 'PC', host: 'unreachable.invalid', port: server.port, fingerprint: id.fingerprintB64Url, token: ds.pairingToken!);
-    Future<WebSocket> connect(String h, int p, String fp) => Future<WebSocket>.error(const SocketException('unreachable'));
+    Future<SecureSocket> connect(String h, int p, String fp) => Future<SecureSocket>.error(const SocketException('unreachable'));
     await expectLater(
       PcLink.pair(qr: qr, session: PhoneSession(signer: FakeSigner(), clock: const SystemClock()), onEffect: (_) {}, connect: connect, resolveHost: (_) async => null),
       throwsA(isA<SocketException>()),
     );
   });
 
-  test('WebSocket pings keep being answered while a slow fingerprint prompt is up', () async {
+  test('the link survives a slow fingerprint prompt (well under the liveness timeout)', () async {
     final signer = _SlowSigner(const Duration(milliseconds: 1500));
     final ps = PhoneSession(signer: signer, clock: const SystemClock());
     ds.startPairing();
@@ -200,11 +200,6 @@ void main() {
     final link = PcLink(pc: paired, session: ps, onEffect: (_) {});
     await link.start();
     await _until(() => ds.phoneOnline);
-    // A ping interval far shorter than the prompt: a paused reader would
-    // miss the pongs and dart:io would drop the connection.
-    for (final ws in server.connections) {
-      ws.pingInterval = const Duration(milliseconds: 200);
-    }
 
     final (authId, fx) = ds.requestAuth(label: 'Mon app');
     server.apply(fx);
@@ -223,7 +218,7 @@ void main() {
     // Fails instantly every time, so the loop reliably reaches its backoff
     // sleep — with every backoff forced to 30s — almost immediately,
     // without depending on real (slow/OS-specific) TCP-refusal timing.
-    Future<WebSocket> alwaysFailConnect(String h, int p, String fp) => Future<WebSocket>.error(const SocketException('refused'));
+    Future<SecureSocket> alwaysFailConnect(String h, int p, String fp) => Future<SecureSocket>.error(const SocketException('refused'));
     final link = PcLink(pc: paired, session: ps, onEffect: (_) {}, connect: alwaysFailConnect, backoff: (_) => const Duration(seconds: 30));
     await link.start();
     // Let the failing connect attempt run its course so the loop is

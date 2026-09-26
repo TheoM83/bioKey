@@ -8,7 +8,7 @@ import 'apps_tab.dart';
 import 'phone_tab.dart';
 
 /// The main BioKey window: closing it hides it to the tray instead of
-/// quitting the app, which keeps the WebSocket server and mDNS
+/// quitting the app, which keeps the TLS link server and mDNS
 /// advertisement running in the background.
 final class MainWindow extends StatefulWidget {
   const MainWindow({super.key, required this.controller});

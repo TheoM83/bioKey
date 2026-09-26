@@ -1,7 +1,7 @@
 import 'package:bonsoir/bonsoir.dart';
 
-/// Advertises the desktop's WebSocket service on the LAN via mDNS/Bonjour
-/// so the phone can discover it without manual IP entry.
+/// Advertises the desktop's pinned-TLS link service on the LAN via
+/// mDNS/Bonjour so the phone can discover it without manual IP entry.
 final class MdnsAdvertiser {
   BonsoirBroadcast? _broadcast;
 
