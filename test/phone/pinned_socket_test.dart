@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:biokey/core/crypto/identity.dart';
 import 'package:biokey/core/crypto/verify.dart';
@@ -35,6 +36,29 @@ void main() {
     expect(
       connectPinned(host: '127.0.0.1', port: server.port, fingerprint: otherIdentity.fingerprintB64Url).timeout(const Duration(seconds: 5)),
       throwsA(anything),
+    );
+  });
+
+  test('a fingerprint mismatch is still rejected even if onBadCertificate waves it through', () async {
+    // Simulates onBadCertificate being asked about a *different* cert than
+    // the one actually presented (e.g. a peer sending [attacker leaf,
+    // genuine cert]) by forcing it to always accept: the post-connect
+    // check against socket.peerCertificate — the real leaf — must be what
+    // actually rejects this, not onBadCertificate.
+    final identity = generateDesktopIdentity(pcName: 'PC');
+    final session = DesktopSession(pcId: identity.pcId, pcName: 'PC', verifier: const EcdsaVerifier(), clock: const SystemClock());
+    final server = TlsServer(identity: identity, session: session, onEffect: (_) {});
+    await server.start(address: '127.0.0.1', port: 0);
+    addTearDown(server.stop);
+
+    await expectLater(
+      connectPinned(
+        host: '127.0.0.1',
+        port: server.port,
+        fingerprint: 'does-not-match-anything',
+        onBadCertificateOverride: (_) => true,
+      ).timeout(const Duration(seconds: 5)),
+      throwsA(isA<HandshakeException>()),
     );
   });
 

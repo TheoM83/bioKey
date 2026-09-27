@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import '../../core/crypto/identity.dart';
 
 /// Connects to the desktop's pinned-TLS raw socket endpoint: the server's
@@ -12,14 +13,43 @@ import '../../core/crypto/identity.dart';
 /// would be accepted *without* even reaching [onBadCertificate]. Starting
 /// from an empty trust store forces every certificate — including a
 /// legitimately CA-signed one — through the pin check below.
-Future<SecureSocket> connectPinned({required String host, required int port, required String fingerprint}) async {
+///
+/// Defence in depth: `onBadCertificate` can be invoked once per certificate
+/// in the chain the peer presents, not only the leaf — a peer presenting
+/// `[attacker leaf, genuine cert]` could get `onBadCertificate` called with
+/// the *genuine* one, which matches [fingerprint] and would otherwise wave
+/// the whole (attacker-controlled) connection through. So after the
+/// handshake completes we independently re-check [fingerprint] against
+/// `socket.peerCertificate` — which the platform TLS stack guarantees is
+/// always the leaf actually presented — and refuse the socket if it
+/// disagrees, regardless of what `onBadCertificate` decided.
+Future<SecureSocket> connectPinned({
+  required String host,
+  required int port,
+  required String fingerprint,
+  // Test-only hook: lets a test simulate onBadCertificate waving through a
+  // mismatched cert (as in the attack above) without having to build a
+  // real forged certificate chain, so the post-connect re-check below can
+  // be exercised as the thing that actually rejects it.
+  @visibleForTesting bool Function(X509Certificate cert)? onBadCertificateOverride,
+}) async {
   final socket = await SecureSocket.connect(
     host,
     port,
     context: SecurityContext(withTrustedRoots: false),
-    onBadCertificate: (cert) => certFingerprintB64Url(cert.der) == fingerprint,
+    onBadCertificate: onBadCertificateOverride ?? (cert) => certFingerprintB64Url(cert.der) == fingerprint,
     timeout: const Duration(seconds: 4),
   );
-  socket.setOption(SocketOption.tcpNoDelay, true);
+  final peer = socket.peerCertificate;
+  if (peer == null || certFingerprintB64Url(peer.der) != fingerprint) {
+    socket.destroy();
+    throw HandshakeException('pinned certificate fingerprint mismatch (post-connect check)');
+  }
+  try {
+    socket.setOption(SocketOption.tcpNoDelay, true);
+  } on Object {
+    socket.destroy();
+    rethrow;
+  }
   return socket;
 }
