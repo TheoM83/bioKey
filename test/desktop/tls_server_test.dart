@@ -177,6 +177,31 @@ void main() {
     expect(effects.whereType<PairingExpired>().length, 1);
   });
 
+  test('an unauthenticated client pinging every 200ms with a 500ms idle deadline is still closed', () async {
+    await server.stop();
+    server = TlsServer(identity: id, session: session, onEffect: effects.add, unauthIdle: const Duration(milliseconds: 500));
+    await server.start(address: '127.0.0.1', port: 0);
+
+    final socket = await connectPinned('127.0.0.1', server.port, id.fingerprintB64Url);
+    final closed = Completer<void>();
+    socket.listen((_) {}, onDone: closed.complete, onError: (Object _) => closed.complete());
+    // A `ping` from a connection that never authenticated must not extend
+    // (or even survive on) its idle deadline: TlsServer drops any frame
+    // from an unauthenticated connection that isn't pair/pair_proof/hello,
+    // and — even if it somehow got through — frames no longer re-arm the
+    // unauthenticated idle timer at all, so pinging can't hold the slot
+    // open past the 500ms absolute deadline either.
+    final pinger = Timer.periodic(const Duration(milliseconds: 200), (_) {
+      try {
+        socket.add(encodeFrame(Codec.encode(const PingMsg())));
+      } on Object {
+        // Already closed: nothing to do.
+      }
+    });
+    await closed.future.timeout(const Duration(seconds: 2), onTimeout: () => fail('pinging kept the unauthenticated connection alive past its deadline'));
+    pinger.cancel();
+  });
+
   test('an unauthenticated socket is closed after the idle delay; an authenticated one is not', () async {
     await server.stop();
     server = TlsServer(identity: id, session: session, onEffect: effects.add, unauthIdle: const Duration(milliseconds: 200));

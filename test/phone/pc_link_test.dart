@@ -181,6 +181,13 @@ void main() {
     ds.startPairing();
     final qr = QrPayload(pcId: id.pcId, name: 'PC', host: '127.0.0.1', port: server.port, fingerprint: id.fingerprintB64Url, token: ds.pairingToken!);
     final paired = await PcLink.pair(qr: qr, session: ps, onEffect: (_) {}).timeout(const Duration(seconds: 5));
+    // pair()'s own teardown drains the peer's close echo before returning,
+    // so the desktop's onDisconnect is normally already done by here — but
+    // make it an explicit wait rather than an implicit race, so a slow
+    // machine can't make ds.phoneOnline read true from the *pairing*
+    // connection's stale state instead of the new link's first real
+    // attempt below.
+    await _until(() => !ds.phoneOnline);
 
     // Both the manual (tunnel) host and the stored-but-stale LAN host fail
     // instantly; only the real address — which discovery will resolve to

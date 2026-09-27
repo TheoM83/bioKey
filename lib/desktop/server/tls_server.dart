@@ -28,12 +28,17 @@ abstract interface class LinkServerApi {
 /// be avoided with `SecureServerSocket`, which only yields already-connected
 /// sockets — but is destroyed immediately, before any frame is read), a
 /// socket that hasn't authenticated (no `welcome`/`paired` sent to it yet)
-/// is closed after [unauthIdle] without a frame — extended to [pairingIdle]
-/// once it has been sent a `pair_challenge`, since the user is then looking
-/// at a fingerprint prompt — and, once authenticated, a socket that has sent
-/// no frame at all for [livenessTimeout] is closed too. That liveness rule
-/// replaces a transport-level ping/pong: the phone sends a protocol `ping`
-/// every 30 s when otherwise idle, which is enough to keep resetting it.
+/// is closed after [unauthIdle] from the moment it's accepted — extended
+/// once, to [pairingIdle], when it's sent a `pair_challenge`, since the
+/// user is then looking at a fingerprint prompt — and that deadline is
+/// absolute: unlike the authenticated liveness rule below, frames from an
+/// unauthenticated socket never extend it (see `_isAllowedUnauthFrame`
+/// and the frame listener in `_onConnection`), so a socket can't hold its
+/// slot open indefinitely by pinging through it. Once authenticated, a
+/// socket that has sent no frame at all for [livenessTimeout] is closed
+/// too, but that one *is* extended by every frame — it replaces a
+/// transport-level ping/pong: the phone sends a protocol `ping` every 30 s
+/// when otherwise idle, which is enough to keep resetting it.
 final class TlsServer implements LinkServerApi {
   TlsServer({
     required this.identity,
@@ -98,20 +103,63 @@ final class TlsServer implements LinkServerApi {
       socket.destroy();
       return;
     }
-    socket.setOption(SocketOption.tcpNoDelay, true);
+    try {
+      socket.setOption(SocketOption.tcpNoDelay, true);
+    } on Object {
+      // A socket that can't even have its options set is not one worth
+      // serving — destroy it outright rather than risk a half-set-up
+      // connection lingering around.
+      socket.destroy();
+      return;
+    }
     final connId = 'c${++_seq}';
     _conns[connId] = socket;
+    // Unauthenticated deadline: absolute from accept, not extended by
+    // frames (see the frame listener below) — only _observeOutgoing
+    // pushing it out once to pairingIdle when we send pair_challenge, and
+    // (once authenticated) to livenessTimeout, ever move it. A socket that
+    // never authenticates cannot keep its slot alive by pinging.
     _armIdle(connId, unauthIdle);
 
     FrameDecoder().bind(socket).listen(
       (payload) {
-        _armIdle(connId, _idleFor[connId] ?? unauthIdle);
+        if (_authed.contains(connId)) {
+          // Authenticated: every frame is proof of life and resets the
+          // liveness clock — this is what lets the phone's own idle `ping`
+          // keep the connection open.
+          _armIdle(connId, _idleFor[connId] ?? livenessTimeout);
+        } else if (!_isAllowedUnauthFrame(payload)) {
+          // Anything other than the pairing/hello handshake from a socket
+          // that hasn't authenticated yet is dropped outright — in
+          // particular a `ping`, which would otherwise let an
+          // unauthenticated client hold its slot open indefinitely by
+          // pinging through its idle deadline.
+          apply([CloseConn(connId)]);
+          return;
+        }
         apply(session.onFrame(connId, payload));
       },
       onDone: () => _dropConnection(connId),
       onError: (Object _) => _dropConnection(connId),
       cancelOnError: true,
     );
+  }
+
+  /// Whether [frame] decodes to one of the three message types a socket
+  /// that hasn't authenticated yet may legitimately send: starting a pair
+  /// ([PairMsg]), completing one ([PairProofMsg]), or resuming an existing
+  /// pairing ([HelloMsg]). Everything else — including a `ping`, which
+  /// [DesktopSession.onFrame] would otherwise happily answer from any
+  /// connection — must not be allowed to keep an unauthenticated slot
+  /// alive.
+  bool _isAllowedUnauthFrame(String frame) {
+    final Message m;
+    try {
+      m = Codec.decode(frame);
+    } on ProtocolException {
+      return false;
+    }
+    return m is PairMsg || m is PairProofMsg || m is HelloMsg;
   }
 
   /// Idempotent teardown for one connection: destroys the socket (unless
