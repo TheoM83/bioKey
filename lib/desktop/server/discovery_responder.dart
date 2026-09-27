@@ -6,6 +6,15 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../../core/discovery/udp_discovery.dart';
 
+/// The operations [DesktopController] needs from a LAN discovery
+/// responder, extracted so tests can inject a fake whose [start] throws
+/// (e.g. to simulate the discovery UDP port being already in use) without
+/// touching a real socket.
+abstract interface class DiscoveryApi {
+  Future<void> start({required String pcId, required String name, required int tcpPort, InternetAddress? bind, int port = discoveryPort});
+  Future<void> stop();
+}
+
 /// Answers UDP discovery requests on the LAN so the phone can find this
 /// PC's current IP without manual entry — see `udp_discovery.dart` for the
 /// wire protocol.
@@ -18,7 +27,7 @@ import '../../core/discovery/udp_discovery.dart';
 /// or real source can't starve replies to every other one, and a flood
 /// from many sources at once still can't turn this into a traffic
 /// amplifier or peg the process.
-final class DiscoveryResponder {
+final class DiscoveryResponder implements DiscoveryApi {
   static const _maxRepliesPerSecondPerSource = 20;
   static const _maxRepliesPerSecondGlobal = 100;
 
@@ -36,6 +45,7 @@ final class DiscoveryResponder {
   /// A call while already running stops the previous socket first, rather
   /// than binding a second one alongside it — [start] always leaves exactly
   /// one responder alive, never two racing for the same port.
+  @override
   Future<void> start({
     required String pcId,
     required String name,
@@ -55,7 +65,11 @@ final class DiscoveryResponder {
     socket.broadcastEnabled = true;
     final reply = utf8.encode(formatDiscoveryReply(pcId: pcId, tcpPort: tcpPort, name: name));
 
-    var windowStart = DateTime.now();
+    // A Stopwatch (monotonic) rather than DateTime.now() (wall clock): an
+    // NTP sync or DST/timezone change moving the wall clock backwards or
+    // jumping it forward must not stall or reset the rate limit early.
+    final windowClock = Stopwatch()..start();
+    var windowStartMs = 0;
     var globalInWindow = 0;
     final perSourceInWindow = <String, int>{};
 
@@ -67,9 +81,9 @@ final class DiscoveryResponder {
         if (datagram == null) return;
         if (!isDiscoveryRequest(datagram.data)) return;
 
-        final now = DateTime.now();
-        if (now.difference(windowStart) >= const Duration(seconds: 1)) {
-          windowStart = now;
+        final nowMs = windowClock.elapsedMilliseconds;
+        if (nowMs - windowStartMs >= 1000) {
+          windowStartMs = nowMs;
           globalInWindow = 0;
           perSourceInWindow.clear();
         }
@@ -95,6 +109,7 @@ final class DiscoveryResponder {
     );
   }
 
+  @override
   Future<void> stop() async {
     await _sub?.cancel();
     _sub = null;

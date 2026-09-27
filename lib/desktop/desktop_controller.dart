@@ -30,7 +30,7 @@ final class DesktopController extends ChangeNotifier {
     required Clock clock,
     required Notifier notifier,
     LinkServerApi Function(DesktopIdentity identity, DesktopSession session, void Function(DesktopEffect) onEffect)? serverFactory,
-    DiscoveryResponder? discovery,
+    DiscoveryApi? discovery,
     void Function()? onShowWindow,
     void Function()? onDispose,
     Duration phoneWait = const Duration(seconds: 5),
@@ -56,7 +56,7 @@ final class DesktopController extends ChangeNotifier {
   final Clock _clock;
   final Notifier _notifier;
   final LinkServerApi Function(DesktopIdentity, DesktopSession, void Function(DesktopEffect))? _serverFactory;
-  final DiscoveryResponder? _discovery;
+  final DiscoveryApi? _discovery;
   final void Function()? _onShowWindow;
   final void Function()? _onDispose;
 
@@ -121,7 +121,16 @@ final class DesktopController extends ChangeNotifier {
     _server = factory(_identity, _session, _onEffect);
     _serverCreated = true;
     await _server.start(port: await _store.port());
-    await _discovery?.start(pcId: _identity.pcId, name: pcName, tcpPort: _server.port);
+    try {
+      await _discovery?.start(pcId: _identity.pcId, name: pcName, tcpPort: _server.port);
+    } on Object {
+      // Discovery is a convenience (auto-find on the LAN), not a
+      // requirement: pairing by QR code (which carries the host directly)
+      // and typing a manual address both still work without it. A bind
+      // failure here (e.g. port 47623 already held by another process)
+      // must not abort the rest of startup.
+      unawaited(_notifier.show('BioKey', 'Découverte réseau indisponible (port 47623 occupé) — l\'appairage par QR et l\'adresse manuelle fonctionnent'));
+    }
 
     _appsCache = await _apps.all();
     _initialized = true;
