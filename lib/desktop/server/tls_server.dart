@@ -21,7 +21,8 @@ abstract interface class LinkServerApi {
 /// length-prefixed JSON frames (`framing.dart`), feeds incoming frames into
 /// the pure [DesktopSession] state machine, and executes the
 /// [DesktopEffect]s it returns (send/close), plus a periodic tick and a
-/// protocol-level keep-alive ping on every open connection.
+/// protocol-level keep-alive ping on every authenticated connection (see
+/// [sendPings]).
 ///
 /// Hardening: at most [maxConnections] sockets are served at once (a
 /// connection over the cap still completes its TLS handshake — that can't
@@ -81,21 +82,33 @@ final class TlsServer implements LinkServerApi {
     _server = await SecureServerSocket.bind(address, port, identity.securityContext());
     _serverSub = _server!.listen(_onConnection, onError: (Object _) {});
     _tick = Timer.periodic(const Duration(seconds: 1), (_) => apply(session.tick()));
-    _ping = Timer.periodic(pingInterval, (_) {
-      final frame = encodeFrame(Codec.encode(const PingMsg()));
-      // Snapshot the ids first: a failed write drops the connection (see
-      // _dropConnection), which mutates _conns — iterating it directly
-      // while removing entries from it would throw.
-      for (final connId in _conns.keys.toList()) {
-        final socket = _conns[connId];
-        if (socket == null) continue;
-        try {
-          socket.add(frame);
-        } on Object {
-          _dropConnection(connId);
-        }
+    _ping = Timer.periodic(pingInterval, (_) => sendPings());
+  }
+
+  /// Writes a protocol `ping` to every *authenticated* connection.
+  /// Unauthenticated connections are deliberately skipped — they may not
+  /// even have sent `pair` yet, so writing to one here would be a `ping`
+  /// arriving before the client is done authenticating; combined with the
+  /// pre-auth frame allowlist (see `_isAllowedUnauthFrame`), the phone's
+  /// unavoidable `pong` reply to it would then get the connection closed
+  /// as a disallowed pre-auth frame. Public (not `_`-private in effect,
+  /// via `@visibleForTesting`) so a test can invoke it directly instead of
+  /// waiting out the real 45 s interval.
+  @visibleForTesting
+  void sendPings() {
+    final frame = encodeFrame(Codec.encode(const PingMsg()));
+    // Snapshot the ids first: a failed write drops the connection (see
+    // _dropConnection), which mutates _authed/_conns — iterating either
+    // directly while removing entries from it would throw.
+    for (final connId in _authed.toList()) {
+      final socket = _conns[connId];
+      if (socket == null) continue;
+      try {
+        socket.add(frame);
+      } on Object {
+        _dropConnection(connId);
       }
-    });
+    }
   }
 
   void _onConnection(SecureSocket socket) {
@@ -123,6 +136,12 @@ final class TlsServer implements LinkServerApi {
 
     FrameDecoder().bind(socket).listen(
       (payload) {
+        // A close (from onDone/onError, or from a frame earlier in the
+        // *same* decoded chunk closing the connection — see the
+        // disallowed-frame branch below) may already have forgotten this
+        // connId; a further frame decoded from that same chunk must not
+        // resurrect it by reaching session.onFrame for a now-dead id.
+        if (!_conns.containsKey(connId)) return;
         if (_authed.contains(connId)) {
           // Authenticated: every frame is proof of life and resets the
           // liveness clock — this is what lets the phone's own idle `ping`
@@ -145,13 +164,17 @@ final class TlsServer implements LinkServerApi {
     );
   }
 
-  /// Whether [frame] decodes to one of the three message types a socket
-  /// that hasn't authenticated yet may legitimately send: starting a pair
-  /// ([PairMsg]), completing one ([PairProofMsg]), or resuming an existing
-  /// pairing ([HelloMsg]). Everything else — including a `ping`, which
-  /// [DesktopSession.onFrame] would otherwise happily answer from any
-  /// connection — must not be allowed to keep an unauthenticated slot
-  /// alive.
+  /// Whether [frame] decodes to one of the message types a socket that
+  /// hasn't authenticated yet may legitimately send: starting a pair
+  /// ([PairMsg]), completing one ([PairProofMsg]), resuming an existing
+  /// pairing ([HelloMsg]) — or [PongMsg], answering a `ping` this server
+  /// sent it before it authenticated (see [sendPings], which no longer
+  /// pings unauthenticated connections at all, but a `ping` could in
+  /// principle still land in the narrow accept→pair window; allowing
+  /// `pong` here is defence in depth against that race, not the primary
+  /// fix). A bare `ping` from an unauthenticated connection is still
+  /// rejected — [DesktopSession.onFrame] would otherwise happily answer it
+  /// from any connection, letting it keep an unauthenticated slot alive.
   bool _isAllowedUnauthFrame(String frame) {
     final Message m;
     try {
@@ -159,7 +182,7 @@ final class TlsServer implements LinkServerApi {
     } on ProtocolException {
       return false;
     }
-    return m is PairMsg || m is PairProofMsg || m is HelloMsg;
+    return m is PairMsg || m is PairProofMsg || m is HelloMsg || m is PongMsg;
   }
 
   /// Idempotent teardown for one connection: destroys the socket (unless

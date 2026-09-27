@@ -218,10 +218,21 @@ void main() {
       backoff: (_) => const Duration(milliseconds: 20),
     );
     await link.start();
-    await _until(() => ds.phoneOnline, timeout: const Duration(seconds: 5));
+    // Deliberately NOT `ds.phoneOnline`: the desktop flips that as soon as
+    // it processes the incoming `hello` — before the reply (`welcome`)
+    // round-trips back to the phone and `PcLink._markOnline` (which
+    // promotes the resolved host into `pc.host`) actually runs. Polling
+    // `ds.phoneOnline` raced that promotion on a slower/differently-
+    // scheduled CI runner (Linux), reading `link.pc.host` before it was
+    // updated even though the connection really did succeed over the
+    // resolved host. `PhonePairedWith` is emitted by `_markOnline` itself,
+    // in the same synchronous call as the host promotion, so waiting for
+    // it is deterministic regardless of platform/timing.
+    await _until(() => phoneFx.any((e) => e is PhonePairedWith), timeout: const Duration(seconds: 5));
 
     expect(tried, containsAllInOrder([manual, staleLan, '127.0.0.1']), reason: 'manual is tried first, then the stale LAN host, then the discovery-resolved real one');
     expect(resolveCalls, greaterThanOrEqualTo(1));
+    expect(link.online, isTrue);
     expect(link.pc.host, '127.0.0.1', reason: 'the LAN host is updated to the address that actually worked');
     expect(link.pc.manualHost, manual, reason: 'the manual host must never be overwritten by a discovery result');
 

@@ -79,6 +79,77 @@ void main() {
     await done.future.timeout(const Duration(seconds: 2));
   });
 
+  test('a pong from an unauthenticated connection is allowed (defence in depth) and does not close it', () async {
+    final socket = await connectPinned('127.0.0.1', server.port, id.fingerprintB64Url);
+    var closed = false;
+    socket.listen((_) {}, onDone: () => closed = true, onError: (Object _) => closed = true);
+    socket.add(encodeFrame(Codec.encode(const PongMsg())));
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(closed, isFalse, reason: 'a pong answering a ping sent before the connection authenticated must not be rejected as a disallowed pre-auth frame');
+    await socket.close();
+  });
+
+  test('sendPings only writes to authenticated connections', () async {
+    final unauth = await connectPinned('127.0.0.1', server.port, id.fingerprintB64Url);
+    final inbox = StreamQueue<String>(FrameDecoder().bind(unauth));
+
+    session.startPairing();
+    final authed = await connectPinned('127.0.0.1', server.port, id.fingerprintB64Url);
+    final authedInbox = StreamQueue<String>(FrameDecoder().bind(authed));
+    authed.add(encodeFrame(Codec.encode(PairMsg(token: session.pairingToken!, name: 'Fake', pub: keys.pubSpkiB64))));
+    final ch = Codec.decode(await authedInbox.next) as PairChallengeMsg;
+    authed.add(encodeFrame(Codec.encode(PairProofMsg(sig: keys.sign('$pairProofDomain${ch.nonce}')))));
+    expect(Codec.decode(await authedInbox.next), isA<PairedMsg>());
+
+    server.sendPings();
+
+    // The authenticated connection gets a real ping...
+    expect(Codec.decode(await authedInbox.next.timeout(const Duration(seconds: 2))), isA<PingMsg>());
+    // ...but the unauthenticated one, still sitting mid-nothing, gets
+    // nothing at all — give it a beat to prove no frame ever arrives.
+    var unauthGotSomething = false;
+    unawaited(inbox.next.then(
+      (_) {
+        unauthGotSomething = true;
+      },
+      // Expected once the socket below is closed with nothing ever having
+      // arrived: the queue's pending `next()` completes with an error
+      // rather than a value.
+      onError: (Object _) {},
+    ));
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(unauthGotSomething, isFalse, reason: 'sendPings must never write to a connection that has not authenticated');
+
+    await unauth.close();
+    await authed.close();
+  });
+
+  test('a frame decoded from the same chunk right after a disallowed frame closed the connection is never processed', () async {
+    session.startPairing();
+    final socket = await connectPinned('127.0.0.1', server.port, id.fingerprintB64Url);
+    final closed = Completer<void>();
+    socket.listen((_) {}, onDone: closed.complete, onError: (Object _) => closed.complete());
+
+    // A bare `ping` from an unauthenticated connection is disallowed (see
+    // _isAllowedUnauthFrame) and closes it — a `pair` frame right behind
+    // it, in the exact same write (so both decode out of one chunk), must
+    // never reach session.onFrame for that now-dead connection id.
+    final ping = encodeFrame(Codec.encode(const PingMsg()));
+    final pair = encodeFrame(Codec.encode(PairMsg(token: session.pairingToken!, name: 'Fake', pub: keys.pubSpkiB64)));
+    socket.add(ping + pair);
+    await closed.future.timeout(const Duration(seconds: 2));
+
+    // If the `pair` frame had reached the session despite the connection
+    // being dropped, it would have consumed the one-shot pairing token —
+    // a fresh connection presenting the same token would then be
+    // rejected. Assert it's still usable instead.
+    final retry = await connectPinned('127.0.0.1', server.port, id.fingerprintB64Url);
+    final inbox = StreamQueue<String>(FrameDecoder().bind(retry));
+    retry.add(encodeFrame(Codec.encode(PairMsg(token: session.pairingToken!, name: 'Fake2', pub: keys.pubSpkiB64))));
+    expect(Codec.decode(await inbox.next.timeout(const Duration(seconds: 2))), isA<PairChallengeMsg>(), reason: 'the token was never consumed by the frame that arrived after the connection was already dropped');
+    await retry.close();
+  });
+
   test('a length prefix of exactly the max frame size is accepted; one byte over is rejected', () async {
     // At the limit: the header alone must not get the socket closed — the
     // decoder should be waiting for a body, not rejecting outright.
