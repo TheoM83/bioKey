@@ -21,9 +21,9 @@ through the user's own tunnel when they're not on the same LAN.
   tunnel when off the home LAN — BioKey itself never runs a server.
 - Stricter SPKI/DER validation on the certificate/public-key material
   exchanged during pairing.
-- Per-source rate limit on discovery replies (in addition to the existing
-  global one), so one flooding sender can't starve replies to everyone
-  else on the LAN.
+- Rate limiting on discovery replies: both a global cap and a per-source
+  one (new in this release, alongside discovery itself), so one flooding
+  sender can't starve replies to everyone else on the LAN.
 
 ### Changed
 

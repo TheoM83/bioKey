@@ -2736,13 +2736,13 @@ Tick each line in the checklist file with measured values:
 - Sleep the PC 2 min, wake → phone reconnects without action (watch tray status).
 - Toggle phone Wi-Fi off/on → reconnects.
 - Reboot PC → BioKey starts in the tray, phone reconnects.
-- Firewall: `netstat -ano | findstr biokey` shows only LISTEN on 47621/47622 and LAN peers.
+- Firewall: `netstat -ano | findstr biokey` shows only LISTEN on TCP 47621/47622 and UDP 47623 (LAN discovery), plus LAN peers.
 - Swipe the app away from recents then request → prompt still arrives (links live in the foreground service).
 - Reboot the phone (don't open BioKey) then request → service restarted on boot, app launched / full-screen alert, prompt arrives.
 - Phone idle > 6 h then request → still connected (connectedDevice service, no dataSync 6 h cap).
 - Request from the lock screen → screen turns on, BioKey shows over the lock screen with the prompt.
 - Pair on a PC with WSL/Hyper-V installed → the QR carries the Wi-Fi/Ethernet address (not a vEthernet one); pairing succeeds.
-- Phone leaves the Wi-Fi abruptly (airplane mode) → PC tray shows « Téléphone hors ligne » within ~30 s (15 s WebSocket ping).
+- Phone leaves the Wi-Fi abruptly (airplane mode) → PC tray shows « Téléphone hors ligne » within ~60 s (the liveness timeout — this is raw pinned TLS now, no transport-level ping/pong; a healthy link never gets close to it thanks to the phone's own protocol `ping` every 30 s and the PC's every 45 s).
 - Change the PC's IP (reconnect Wi-Fi, or switch network) → discovery works after the PC changes IP: the phone finds it again without re-pairing.
 - Set a manual host on the phone pointing at the PC's WireGuard/Tailscale tunnel address, off the home LAN → manual host through Tailscale/WireGuard: the link connects over the tunnel.
 

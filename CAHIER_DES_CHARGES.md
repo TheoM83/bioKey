@@ -107,7 +107,7 @@ MoSCoW : **M** indispensable v1 · **S** souhaitable · **C** plus tard.
 |---|---|
 | Latence | Clic PC → invite affichée sur le téléphone < 1 s (LAN) ; scénario complet < 3 s |
 | Fiabilité | Reconnexion sans intervention ; 0 demande fantôme ; 0 rejeu possible |
-| Batterie | Connexion TLS persistante idle + ping toutes les 45 s ; pas de polling ; < 1 % / jour au repos |
+| Batterie | Connexion TLS persistante idle ; téléphone → PC : `ping` après 30 s d'inactivité ; PC → téléphone : `ping` toutes les 45 s ; les deux sens ferment la connexion après 60 s sans aucune trame reçue ; pas de polling ; < 1 % / jour au repos |
 | Ressources PC | < 150 Mo RAM au repos (Flutter Windows ≈ 80–120 Mo), < 1 % CPU |
 | Confidentialité | Aucune donnée ne quitte le LAN. Aucun réseau sortant (vérifiable au pare-feu) |
 | Accessibilité | Tailles de texte système, contraste AA, lecteur d'écran sur les 4 écrans |
@@ -140,7 +140,7 @@ MoSCoW : **M** indispensable v1 · **S** souhaitable · **C** plus tard.
 - **Ce qui est signé** : SHA-256 des **octets exacts** du message `auth` tel qu'envoyé par le PC. Pas de canonicalisation JSON : le téléphone signe ce qu'il a reçu, le PC vérifie sur ce qu'il a envoyé.
 - **Vérification côté PC** : ECDSA P-256 / SHA-256 en Dart pur. Aucune dépendance native.
 
-### 7.3 Protocole (JSON en trames longueur-préfixées (4 octets big-endian + UTF-8, ≤ 64 Kio) sur TLS 1.2+ épinglé, version 1)
+### 7.3 Protocole (JSON en trames longueur-préfixées (4 octets big-endian + UTF-8, ≤ 64 Kio) sur TLS 1.3 épinglé, version 1)
 
 **Appairage**
 
@@ -160,15 +160,16 @@ PC        → Téléphone {"type":"welcome"}  ou  {"type":"unknown"}            
 PC        → Téléphone {"type":"auth","id":"<uuid>","pcId":"…","action":"open","label":"Mon app","nonce":"…","iat":1780000000,"exp":1780000030}
 Téléphone → PC        {"type":"auth_ok","id":"…","sig":"…"}
               ou      {"type":"auth_denied","id":"…","reason":"user|timeout|biometric_failed"}
-Les deux              {"type":"ping"} / {"type":"pong"}  toutes les 45 s
+Téléphone → PC        {"type":"ping"}  après 30 s d'inactivité, répond {"type":"pong"}
+PC        → Téléphone {"type":"ping"}  toutes les 45 s, répond {"type":"pong"}
 ```
 
-Règles : tout message inconnu ou malformé ferme la connexion. Toute signature invalide = refus + entrée d'historique. Version incompatible ⇒ message d'erreur clair, pas de dégradation silencieuse.
+Règles : tout message inconnu ou malformé ferme la connexion. Toute signature invalide = refus + entrée d'historique. Version incompatible ⇒ message d'erreur clair, pas de dégradation silencieuse. Liveness : chaque côté ferme la connexion s'il n'a reçu **aucune** trame (`ping` compris) depuis 60 s — ce qui laisse deux marges de raté au `ping` de 45 s du PC comme à celui de 30 s du téléphone avant la coupure.
 
 ## 8. Architecture et technologies
 
 ```
-┌──────────────────────────┐   TLS brut 1.2+, cert épinglé   ┌──────────────────────────┐
+┌──────────────────────────┐    TLS brut 1.3, cert épinglé   ┌──────────────────────────┐
 │  BioKey · rôle Téléphone │ ◄──────── trames TLS LAN ───────► │  BioKey · rôle Ordinateur│
 │  Android / iOS           │                                    │  Windows / macOS / Linux │
 │                          │   auth(id, nonce, label)           │                          │
