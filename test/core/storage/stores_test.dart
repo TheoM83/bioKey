@@ -39,6 +39,27 @@ void main() {
     expect(await s.pubKey(), isNull);
   });
 
+  test('PairedPc.manualHost round-trips through JSON and copyWith', () {
+    const withoutManual = PairedPc(pcId: 'a', name: 'A', host: '1.1.1.1', port: 1, fingerprint: 'f', session: 's');
+    expect(withoutManual.toJson().containsKey('manualHost'), isFalse, reason: 'omitted, not written as null, for older stored records');
+    expect(PairedPc.fromJson(withoutManual.toJson()).manualHost, isNull);
+
+    final withManual = withoutManual.copyWith(manualHost: 'tunnel.example');
+    expect(withManual.host, '1.1.1.1', reason: 'copyWith(manualHost:) must not touch host');
+    expect(withManual.manualHost, 'tunnel.example');
+    final roundTripped = PairedPc.fromJson(withManual.toJson());
+    expect(roundTripped, withManual);
+    expect(roundTripped.manualHost, 'tunnel.example');
+
+    final cleared = withManual.copyWith(clearManualHost: true);
+    expect(cleared.manualHost, isNull);
+    expect(cleared.host, '1.1.1.1');
+
+    final hostMoved = withManual.copyWith(host: '2.2.2.2');
+    expect(hostMoved.host, '2.2.2.2');
+    expect(hostMoved.manualHost, 'tunnel.example', reason: 'copyWith(host:) alone must not touch manualHost');
+  });
+
   test('DesktopStore degrades gracefully on corrupted storage', () async {
     final kv = InMemorySecureKv();
     final s = DesktopStore(kv);

@@ -9,11 +9,27 @@ final class PairedPc {
     required this.port,
     required this.fingerprint,
     required this.session,
+    this.manualHost,
   });
   final String pcId, name, host, fingerprint, session;
   final int port;
-  Map<String, Object?> toJson() =>
-      {'pcId': pcId, 'name': name, 'host': host, 'port': port, 'fingerprint': fingerprint, 'session': session};
+
+  /// A user-typed host (e.g. a WireGuard/Tailscale tunnel address),
+  /// set via the "Modifier l'adresse…" dialog and never touched by LAN
+  /// discovery — only [host] (the last known LAN address) is ever
+  /// overwritten by a discovery result. `null` means the user hasn't set
+  /// one, so only [host] is tried.
+  final String? manualHost;
+
+  Map<String, Object?> toJson() => {
+        'pcId': pcId,
+        'name': name,
+        'host': host,
+        'port': port,
+        'fingerprint': fingerprint,
+        'session': session,
+        if (manualHost != null) 'manualHost': manualHost,
+      };
   static PairedPc fromJson(Map<String, Object?> j) => PairedPc(
         pcId: j['pcId']! as String,
         name: j['name']! as String,
@@ -21,6 +37,30 @@ final class PairedPc {
         port: j['port']! as int,
         fingerprint: j['fingerprint']! as String,
         session: j['session']! as String,
+        manualHost: j['manualHost'] as String?,
+      );
+
+  /// [clearManualHost] wins over [manualHost] — pass it to explicitly drop
+  /// a previously-set manual host (e.g. the user emptied the field);
+  /// leaving both out keeps whatever [manualHost] this instance already
+  /// has.
+  PairedPc copyWith({
+    String? pcId,
+    String? name,
+    String? host,
+    int? port,
+    String? fingerprint,
+    String? session,
+    String? manualHost,
+    bool clearManualHost = false,
+  }) => PairedPc(
+        pcId: pcId ?? this.pcId,
+        name: name ?? this.name,
+        host: host ?? this.host,
+        port: port ?? this.port,
+        fingerprint: fingerprint ?? this.fingerprint,
+        session: session ?? this.session,
+        manualHost: clearManualHost ? null : (manualHost ?? this.manualHost),
       );
 
   @override
@@ -31,9 +71,10 @@ final class PairedPc {
       other.host == host &&
       other.port == port &&
       other.fingerprint == fingerprint &&
-      other.session == session;
+      other.session == session &&
+      other.manualHost == manualHost;
   @override
-  int get hashCode => Object.hash(pcId, name, host, port, fingerprint, session);
+  int get hashCode => Object.hash(pcId, name, host, port, fingerprint, session, manualHost);
 }
 
 final class PhoneStore {

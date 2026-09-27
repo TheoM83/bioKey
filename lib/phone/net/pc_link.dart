@@ -110,9 +110,38 @@ final class PcLink implements PcLinkApi {
   /// strand the link on it forever; while it *is* set, connect attempts
   /// alternate between it and [pc]'s stored host (see [_preferPending]) so
   /// a resolved-but-wrong host doesn't crowd out retrying the one that's
-  /// known to have worked before.
+  /// known to have worked before. Purely a LAN concept — it is never
+  /// derived from, and never overwrites, [PairedPc.manualHost]; see
+  /// [_candidateHost] for how the two combine when a manual host is set.
   String? _pendingHost;
   bool _preferPending = true;
+
+  /// Whether there are currently two distinct hosts worth alternating
+  /// between: either a discovery-resolved [_pendingHost], or a user-set
+  /// [PairedPc.manualHost] (which always alternates against [pc.host],
+  /// the last known LAN host — see [_candidateHost]).
+  bool get _hasAlternateCandidate => _pendingHost != null || pc.manualHost != null;
+
+  /// The host to try for this connect attempt.
+  ///
+  /// With no manual host set: [_pendingHost] (a discovery-resolved
+  /// candidate not yet confirmed by a `welcome`) when [_preferPending],
+  /// else the stored [PairedPc.host] — unchanged from before manual hosts
+  /// existed.
+  ///
+  /// With a manual host set: alternates between it and the last known LAN
+  /// host — [_pendingHost] when discovery has resolved a fresher one,
+  /// else [PairedPc.host] itself — reusing the same [_preferPending]
+  /// toggle. Discovery only ever refines the LAN side of this pair; it
+  /// never overwrites [PairedPc.manualHost].
+  String _candidateHost() {
+    final manual = pc.manualHost;
+    if (manual == null) {
+      return (_pendingHost != null && _preferPending) ? _pendingHost! : pc.host;
+    }
+    final lan = _pendingHost ?? pc.host;
+    return _preferPending ? manual : lan;
+  }
 
   /// Time elapsed since a frame was last sent/received on the current
   /// socket; drives the idle-ping and liveness-close rules. Backed by a
@@ -191,7 +220,7 @@ final class PcLink implements PcLinkApi {
       SecureSocket? ws;
       Timer? liveness;
       try {
-        final host = (_pendingHost != null && _preferPending) ? _pendingHost! : pc.host;
+        final host = _candidateHost();
         ws = await _connect(host, pc.port, pc.fingerprint);
         if (_stale(gen)) return; // stop() raced the connect: close in finally, don't touch _ws.
         _ws = ws;
@@ -235,9 +264,9 @@ final class PcLink implements PcLinkApi {
         // *next* one alternates to the other candidate host, so a
         // pendingHost that keeps failing doesn't crowd out retrying the
         // stored one, and vice versa.
-        if (_pendingHost != null) _preferPending = !_preferPending;
+        if (_hasAlternateCandidate) _preferPending = !_preferPending;
       } on Object {
-        if (_pendingHost != null) _preferPending = !_preferPending;
+        if (_hasAlternateCandidate) _preferPending = !_preferPending;
       } finally {
         liveness?.cancel();
         _sentSw.stop();
@@ -254,12 +283,17 @@ final class PcLink implements PcLinkApi {
         final h = await _resolveOrWake(pc.pcId);
         if (_stale(gen)) return; // e.g. revoked/stopped while we were resolving.
         final newPendingHost = (h != null && h != pc.host) ? h : null;
-        // Only reset the alternation to "try it first" for a genuinely
-        // new candidate; re-resolving the *same* host we're already
-        // alternating against must not keep clobbering the toggle back to
-        // "prefer pending", or the alternation above never gets a chance
-        // to actually try the stored host again.
-        if (newPendingHost != _pendingHost) _preferPending = true;
+        // Only reset the alternation for a genuinely new candidate;
+        // re-resolving the *same* host we're already alternating against
+        // must not keep clobbering the toggle, or the alternation above
+        // never gets a chance to actually try the other side again. With
+        // no manual host, "prefer pending" means prefer this fresh
+        // discovery result next; with a manual host set, that result is
+        // instead the *other* (LAN) candidate manualHost alternates
+        // against, and manualHost has already had its turn this cycle, so
+        // prefer the fresh LAN candidate next instead of trying manualHost
+        // again immediately.
+        if (newPendingHost != _pendingHost) _preferPending = pc.manualHost == null;
         _pendingHost = newPendingHost;
       }
       if (_stale(gen)) return;
@@ -296,7 +330,10 @@ final class PcLink implements PcLinkApi {
       onEffect(PhoneOnlineChanged(pc.pcId, true));
     }
     if (_pendingHost != null && _pendingHost == connectedHost && _pendingHost != pc.host) {
-      pc = PairedPc(pcId: pc.pcId, name: pc.name, host: _pendingHost!, port: pc.port, fingerprint: pc.fingerprint, session: pc.session);
+      // Only the LAN host moves; a manual host (if set) is untouched —
+      // copyWith without `manualHost` keeps whatever pc.manualHost already
+      // is.
+      pc = pc.copyWith(host: _pendingHost!);
       onEffect(PhonePairedWith(pc));
     }
     _pendingHost = null;

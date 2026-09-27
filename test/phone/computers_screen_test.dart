@@ -46,6 +46,25 @@ void main() {
     expect(savedHost, 'pc-maison.tailnet.ts.net');
   });
 
+  testWidgets("« Modifier l'adresse… » prefills with manualHost when set, not the LAN host", (t) async {
+    await t.pumpWidget(MaterialApp(home: ComputersScreen(
+      pcs: const [PairedPc(pcId: 'a', name: 'PC-MAISON', host: '192.168.1.5', port: 1, fingerprint: 'f', session: 's', manualHost: 'pc-maison.tailnet.ts.net')],
+      isOnline: (_) => true,
+      needsRepair: const {},
+      onScan: () {},
+      onRevoke: (_) {},
+      onSetHost: (a, b) {},
+    )));
+
+    await t.tap(find.byIcon(Icons.more_vert));
+    await t.pumpAndSettle();
+    await t.tap(find.text("Modifier l'adresse…"));
+    await t.pumpAndSettle();
+
+    expect(find.text('pc-maison.tailnet.ts.net'), findsOneWidget);
+    expect(find.text('192.168.1.5'), findsNothing);
+  });
+
   testWidgets("an invalid address shows « Adresse invalide » and does not save", (t) async {
     var called = false;
     await t.pumpWidget(MaterialApp(home: ComputersScreen(

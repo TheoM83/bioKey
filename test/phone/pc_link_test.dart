@@ -175,6 +175,52 @@ void main() {
     await link.stop();
   });
 
+  test('a manual host that fails alternates with the LAN host, and a fresh discovery result is preferred over retrying it', () async {
+    final signer = FakeSigner();
+    final ps = PhoneSession(signer: signer, clock: const SystemClock());
+    ds.startPairing();
+    final qr = QrPayload(pcId: id.pcId, name: 'PC', host: '127.0.0.1', port: server.port, fingerprint: id.fingerprintB64Url, token: ds.pairingToken!);
+    final paired = await PcLink.pair(qr: qr, session: ps, onEffect: (_) {}).timeout(const Duration(seconds: 5));
+
+    // Both the manual (tunnel) host and the stored-but-stale LAN host fail
+    // instantly; only the real address — which discovery will resolve to
+    // — actually connects.
+    const manual = 'bogus.manual.invalid';
+    const staleLan = 'stale.lan.invalid';
+    final tried = <String>[];
+    Future<SecureSocket> connect(String h, int p, String fp) {
+      tried.add(h);
+      if (h == manual || h == staleLan) return Future<SecureSocket>.error(const SocketException('refused'));
+      return connectPinned(host: h, port: p, fingerprint: fp);
+    }
+
+    var resolveCalls = 0;
+    Future<String?> resolve(String pcId) async {
+      resolveCalls++;
+      return '127.0.0.1';
+    }
+
+    final pcWithManual = paired.copyWith(host: staleLan, manualHost: manual);
+    final phoneFx = <PhoneEffect>[];
+    final link = PcLink(
+      pc: pcWithManual,
+      session: ps,
+      onEffect: phoneFx.add,
+      connect: connect,
+      resolveHost: resolve,
+      backoff: (_) => const Duration(milliseconds: 20),
+    );
+    await link.start();
+    await _until(() => ds.phoneOnline, timeout: const Duration(seconds: 5));
+
+    expect(tried, containsAllInOrder([manual, staleLan, '127.0.0.1']), reason: 'manual is tried first, then the stale LAN host, then the discovery-resolved real one');
+    expect(resolveCalls, greaterThanOrEqualTo(1));
+    expect(link.pc.host, '127.0.0.1', reason: 'the LAN host is updated to the address that actually worked');
+    expect(link.pc.manualHost, manual, reason: 'the manual host must never be overwritten by a discovery result');
+
+    await link.stop();
+  });
+
   test('pairing retries once on the discovery-resolved host when the QR host is unreachable', () async {
     ds.startPairing();
     final qr = QrPayload(pcId: id.pcId, name: 'PC', host: 'unreachable.invalid', port: server.port, fingerprint: id.fingerprintB64Url, token: ds.pairingToken!);

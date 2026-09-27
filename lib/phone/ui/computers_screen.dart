@@ -150,7 +150,7 @@ class _SetHostDialog extends StatefulWidget {
 }
 
 class _SetHostDialogState extends State<_SetHostDialog> {
-  late final _controller = TextEditingController(text: widget.pc.host);
+  late final _controller = TextEditingController(text: widget.pc.manualHost ?? widget.pc.host);
   final _formKey = GlobalKey<FormState>();
 
   @override
@@ -168,8 +168,11 @@ class _SetHostDialogState extends State<_SetHostDialog> {
         child: TextFormField(
           controller: _controller,
           autofocus: true,
-          decoration: const InputDecoration(labelText: 'Adresse'),
-          validator: (v) => isValidHost((v ?? '').trim()) ? null : 'Adresse invalide',
+          decoration: const InputDecoration(labelText: 'Adresse', helperText: 'Laisser vide pour revenir à la découverte automatique'),
+          validator: (v) {
+            final t = (v ?? '').trim();
+            return t.isEmpty || isValidHost(t) ? null : 'Adresse invalide';
+          },
         ),
       ),
       actions: [

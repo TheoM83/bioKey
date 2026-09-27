@@ -222,7 +222,7 @@ void main() {
     expect(await store.pcs(), isEmpty);
   });
 
-  test('setHost updates the store, restarts the link with the new host, and preserves session/fingerprint/port', () async {
+  test('setHost sets manualHost, restarts the link, and preserves host/session/fingerprint/port', () async {
     await store.upsertPc(makePc('a'));
     await startBackend();
     final old = latest('a');
@@ -234,15 +234,31 @@ void main() {
     expect(res['reqId'], 'u1');
     expect(res['ok'], isTrue);
     expect(old.stopCalls, 1, reason: 'the old link is stopped before the new one starts');
-    expect(latest('a').pc.host, 'pc-maison.tailnet.ts.net');
+    expect(latest('a').pc.manualHost, 'pc-maison.tailnet.ts.net');
+    expect(latest('a').pc.host, '127.0.0.1', reason: 'setHost must never overwrite the LAN host — only discovery does that');
     expect(latest('a').started, isTrue);
     expect(created.where((l) => l.pc.pcId == 'a' && l.started), hasLength(1), reason: 'never two live links for the same PC');
 
     final saved = (await store.pcs()).single;
-    expect(saved.host, 'pc-maison.tailnet.ts.net');
+    expect(saved.manualHost, 'pc-maison.tailnet.ts.net');
+    expect(saved.host, '127.0.0.1', reason: 'the LAN host is kept, not replaced by the manual one');
     expect(saved.session, 'sess', reason: 'the session secret is preserved across a manual host change');
     expect(saved.fingerprint, 'fp');
     expect(saved.port, 1);
+  });
+
+  test('setHost with an empty host clears manualHost and keeps the LAN host', () async {
+    await store.upsertPc(makePc('a').copyWith(manualHost: 'pc-maison.tailnet.ts.net'));
+    await startBackend();
+
+    link.ui.send({'op': TaskOps.setHost, 'reqId': 'u1', 'pcId': 'a', 'host': ''});
+    await settle();
+
+    final res = ui.singleWhere((m) => m['op'] == TaskOps.setHostResult);
+    expect(res['ok'], isTrue);
+    final saved = (await store.pcs()).single;
+    expect(saved.manualHost, isNull);
+    expect(saved.host, '127.0.0.1');
   });
 
   test('setHost with an invalid host is rejected without touching the store or the link', () async {

@@ -170,26 +170,21 @@ final class LinkCoordinator {
     publishState();
   }
 
-  /// Sets a manual host for [pcId] (for use over the user's own WireGuard/
-  /// Tailscale tunnel — BioKey itself never has a server), validating it,
-  /// persisting it (session/fingerprint/port preserved) and restarting the
-  /// link so the next connect attempt uses it. An invalid host, or an
-  /// unknown [pcId], leaves the store and the link untouched.
+  /// Sets (or, given an empty string, clears) a manual host for [pcId]
+  /// (for use over the user's own WireGuard/Tailscale tunnel — BioKey
+  /// itself never has a server): validates it, persists it as
+  /// [PairedPc.manualHost] — never overwriting [PairedPc.host], the last
+  /// known LAN address, which discovery keeps up to date on its own — and
+  /// restarts the link so the next connect attempt sees it. An invalid
+  /// host, or an unknown [pcId], leaves the store and the link untouched.
   Future<void> _setHost(Object? reqId, Object? pcId, Object? rawHost) async {
     try {
       if (pcId is! String) throw const FormatException('PC manquant');
       final host = (rawHost is String ? rawHost : '').trim();
-      if (!isValidHost(host)) throw const FormatException('Adresse invalide');
+      if (host.isNotEmpty && !isValidHost(host)) throw const FormatException('Adresse invalide');
       final i = _pcs.indexWhere((p) => p.pcId == pcId);
       if (i < 0) throw StateError('PC inconnu');
-      final updated = PairedPc(
-        pcId: _pcs[i].pcId,
-        name: _pcs[i].name,
-        host: host,
-        port: _pcs[i].port,
-        fingerprint: _pcs[i].fingerprint,
-        session: _pcs[i].session,
-      );
+      final updated = _pcs[i].copyWith(manualHost: host.isEmpty ? null : host, clearManualHost: host.isEmpty);
       await _store.upsertPc(updated);
       _pcs = await _store.pcs();
       await _startLink(updated);
