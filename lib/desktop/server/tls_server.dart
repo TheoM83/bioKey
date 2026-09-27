@@ -185,9 +185,14 @@ final class TlsServer implements LinkServerApi {
             }
           }
         case CloseConn():
-          final socket = _conns[e.connId];
-          _forget(e.connId);
-          socket?.destroy();
+          // Route through the idempotent teardown so `session.onDisconnect`
+          // always runs exactly once for this connection, whether the close
+          // was requested by the session (e.g. a bad frame) or by the
+          // idle/liveness timer (see _armIdle) — otherwise the socket's
+          // later onDone finds it already forgotten and _dropConnection
+          // returns early, so `onDisconnect` (and PhoneOnline(false)) never
+          // fires and the tray keeps showing the phone online.
+          _dropConnection(e.connId);
         case AuthResolved():
         case PhonePaired():
         case PhoneOnline():

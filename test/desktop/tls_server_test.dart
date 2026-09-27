@@ -126,6 +126,57 @@ void main() {
     }
   });
 
+  test('the liveness close of an authenticated connection runs onDisconnect: phone goes offline and requestAuth reports noPhone', () async {
+    await server.stop();
+    server = TlsServer(identity: id, session: session, onEffect: effects.add, livenessTimeout: const Duration(milliseconds: 300));
+    await server.start(address: '127.0.0.1', port: 0);
+
+    session.startPairing();
+    final socket = await connectPinned('127.0.0.1', server.port, id.fingerprintB64Url);
+    final inbox = StreamQueue<String>(FrameDecoder().bind(socket));
+    socket.add(encodeFrame(Codec.encode(PairMsg(token: session.pairingToken!, name: 'Fake', pub: keys.pubSpkiB64))));
+    final ch = Codec.decode(await inbox.next) as PairChallengeMsg;
+    socket.add(encodeFrame(Codec.encode(PairProofMsg(sig: keys.sign('biokey-pair:${ch.nonce}')))));
+    expect(Codec.decode(await inbox.next), isA<PairedMsg>());
+    expect(session.phoneOnline, isTrue);
+
+    // The phone stays silent (no frame, not even a ping): the liveness
+    // timer should close the socket and — this is the regression under
+    // test — that close must run session.onDisconnect exactly once, not
+    // silently forget the connection.
+    var socketClosed = false;
+    unawaited(inbox.rest.drain<void>().catchError((_) {}).whenComplete(() => socketClosed = true));
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    expect(socketClosed, isTrue, reason: 'the liveness timeout must close the dead connection');
+    expect(session.phoneOnline, isFalse, reason: 'onDisconnect must have run for the tray/session to notice the phone went offline');
+    expect(effects.whereType<PhoneOnline>().where((e) => !e.online).length, 1, reason: 'onDisconnect must run exactly once');
+
+    final (_, fx) = session.requestAuth(label: 'Mon app');
+    expect(fx.single, isA<AuthResolved>().having((e) => e.outcome, 'outcome', AuthOutcome.noPhone));
+  });
+
+  test('the idle close of an unauthenticated (mid-pairing) connection runs onDisconnect exactly once', () async {
+    await server.stop();
+    server = TlsServer(identity: id, session: session, onEffect: effects.add, pairingIdle: const Duration(milliseconds: 300));
+    await server.start(address: '127.0.0.1', port: 0);
+
+    session.startPairing();
+    final socket = await connectPinned('127.0.0.1', server.port, id.fingerprintB64Url);
+    final inbox = StreamQueue<String>(FrameDecoder().bind(socket));
+    socket.add(encodeFrame(Codec.encode(PairMsg(token: session.pairingToken!, name: 'Fake', pub: keys.pubSpkiB64))));
+    await inbox.next; // pair_challenge: now mid-pairing, still unauthenticated.
+
+    var socketClosed = false;
+    unawaited(inbox.rest.drain<void>().catchError((_) {}).whenComplete(() => socketClosed = true));
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    expect(socketClosed, isTrue);
+    // onDisconnect running exactly once is observable here as exactly one
+    // PairingExpired effect (it clears the dangling pairing candidate);
+    // before the fix, CloseConn from the idle timer never reached
+    // onDisconnect at all, so this would be empty.
+    expect(effects.whereType<PairingExpired>().length, 1);
+  });
+
   test('an unauthenticated socket is closed after the idle delay; an authenticated one is not', () async {
     await server.stop();
     server = TlsServer(identity: id, session: session, onEffect: effects.add, unauthIdle: const Duration(milliseconds: 200));
