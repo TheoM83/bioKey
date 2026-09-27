@@ -33,10 +33,14 @@ Future<SecureSocket> connectPinned({
   // be exercised as the thing that actually rejects it.
   @visibleForTesting bool Function(X509Certificate cert)? onBadCertificateOverride,
 }) async {
+  // TLS 1.3 only, matching the server identity's context (see
+  // identity.dart) and SECURITY.md/spec §7.1/§7.3 — refuses a downgrade
+  // to 1.2 outright rather than merely discouraging it.
+  final context = SecurityContext(withTrustedRoots: false)..minimumTlsProtocolVersion = TlsProtocolVersion.tls1_3;
   final socket = await SecureSocket.connect(
     host,
     port,
-    context: SecurityContext(withTrustedRoots: false),
+    context: context,
     onBadCertificate: onBadCertificateOverride ?? (cert) => certFingerprintB64Url(cert.der) == fingerprint,
     timeout: const Duration(seconds: 4),
   );

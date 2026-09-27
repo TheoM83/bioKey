@@ -25,9 +25,15 @@ final class DesktopIdentity {
   final String fingerprintB64Url;
   final String pcId;
 
+  // TLS 1.3 only: `dart:io`'s SecurityContext.minimumTlsProtocolVersion
+  // (present since Dart 3.9, which this project targets) defaults to
+  // TLS 1.2 — raise it so a downgrade to 1.2 is refused outright rather
+  // than merely discouraged. Keep in step with pinned_socket.dart's client
+  // context and SECURITY.md/spec §7.1/§7.3, which document this floor.
   SecurityContext securityContext() => SecurityContext()
     ..useCertificateChainBytes(utf8.encode(certPem))
-    ..usePrivateKeyBytes(utf8.encode(keyPem));
+    ..usePrivateKeyBytes(utf8.encode(keyPem))
+    ..minimumTlsProtocolVersion = TlsProtocolVersion.tls1_3;
 }
 
 Uint8List _sha256(Uint8List data) => SHA256Digest().process(data);
