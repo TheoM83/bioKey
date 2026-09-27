@@ -19,7 +19,7 @@ vérifie la signature et lance les applications protégées. Pas de serveur,
 pas de cloud, pas de compte : tout se passe sur le réseau local.
 
 ```
- ┌──────────────┐   wss://  TLS épinglé (QR)   ┌──────────────┐
+ ┌──────────────┐   TLS épinglé (QR) · trames JSON   ┌──────────────┐
  │  Téléphone   │ ───────────────────────────► │      PC      │
  │  (Android)   │        signature seule        │  (Windows)   │
  │  clé biométr.│ ◄─────────────────────────── │  vérif. + tray│
@@ -41,6 +41,17 @@ pas de cloud, pas de compte : tout se passe sur le réseau local.
 3. **Appairer** : icône BioKey → Ouvrir BioKey… → onglet Téléphone →
    Afficher le QR → scanner depuis le téléphone → poser le doigt.
 
+### Hors de chez soi
+
+Pour joindre le PC hors du réseau local, installez
+[WireGuard](https://www.wireguard.com/) ou [Tailscale](https://tailscale.com/)
+sur le téléphone et sur le PC, dans le même tunnel privé. Sur le téléphone,
+ouvrez BioKey → menu du PC (⋮) → « Modifier l'adresse… » → entrez l'IP du
+tunnel ou le nom MagicDNS du PC (ex. `pc-maison.tailnet.ts.net`). L'appairage,
+le certificat épinglé et le secret de session restent inchangés — seule
+l'adresse change. BioKey n'utilise et ne fournit aucun relais : le trafic
+passe uniquement par votre tunnel.
+
 ### Protéger une application
 
 Icône BioKey → Ouvrir BioKey… → onglet Apps → Ajouter → « Créer le
@@ -49,8 +60,9 @@ raccourci ».
 ### Sécurité en une phrase
 
 L'empreinte ne quitte jamais le téléphone ; seule une signature ECDSA
-voyage ; la connexion est un `wss://` dont le PC épingle le certificat via
-le QR ; la reconnexion utilise un secret de session remis une seule fois à
+voyage ; la connexion est en TLS brut dont le PC épingle le certificat via
+le QR — aucune bibliothèque réseau tierce : `dart:io` (TLS) + `pointycastle`
+seuls ; la reconnexion utilise un secret de session remis une seule fois à
 l'appairage. Détails et modèle de menace : [SECURITY.md](SECURITY.md).
 
 ### Construire soi-même
@@ -110,7 +122,7 @@ and launches the protected app. No server, no cloud, no account — everything
 stays on the local network.
 
 ```
- ┌──────────────┐   wss://  pinned TLS (QR)    ┌──────────────┐
+ ┌──────────────┐   pinned TLS (QR) · JSON frames   ┌──────────────┐
  │    Phone     │ ───────────────────────────► │      PC      │
  │  (Android)   │        signature only         │  (Windows)   │
  │ biometric key│ ◄─────────────────────────── │ verify + tray │
@@ -131,6 +143,17 @@ stays on the local network.
 3. **Pair**: BioKey tray icon → Open BioKey… → Phone tab → Show QR → scan
    from the phone → place your finger.
 
+### Away from home
+
+To reach the PC outside the local network, install
+[WireGuard](https://www.wireguard.com/) or [Tailscale](https://tailscale.com/)
+on both the phone and the PC, joined to the same private tunnel. On the
+phone, open BioKey → the PC's menu (⋮) → "Modifier l'adresse…" → enter the
+PC's tunnel IP or MagicDNS name (e.g. `pc-maison.tailnet.ts.net`). Pairing,
+the pinned certificate and the session secret are unchanged — only the
+address changes. BioKey never uses or provides a relay: traffic only ever
+flows through your own tunnel.
+
 ### Protect an app
 
 Tray icon → Open BioKey… → Apps tab → Add → "Create shortcut".
@@ -138,8 +161,9 @@ Tray icon → Open BioKey… → Apps tab → Add → "Create shortcut".
 ### Security in one sentence
 
 The fingerprint never leaves the phone; only an ECDSA signature travels;
-the connection is `wss://` with the PC's certificate pinned via the QR
-code; reconnection uses a session secret issued once at pairing time.
+the connection is raw pinned TLS with the PC's certificate pinned via the
+QR code — no third-party network library: `dart:io` (TLS) + `pointycastle`
+alone; reconnection uses a session secret issued once at pairing time.
 Details and threat model: [SECURITY.md](SECURITY.md).
 
 ### Build it yourself

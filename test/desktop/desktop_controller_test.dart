@@ -1,5 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:biokey/core/crypto/verify.dart';
+import 'package:biokey/core/discovery/udp_discovery.dart';
 import 'package:biokey/core/protocol/codec.dart';
 import 'package:biokey/core/protocol/messages.dart';
 import 'package:biokey/core/session/clock.dart';
@@ -10,7 +13,8 @@ import 'package:biokey/desktop/apps/app_store.dart';
 import 'package:biokey/desktop/apps/launcher.dart';
 import 'package:biokey/desktop/desktop_controller.dart';
 import 'package:biokey/desktop/notify.dart';
-import 'package:biokey/desktop/server/ws_server.dart';
+import 'package:biokey/desktop/server/discovery_responder.dart';
+import 'package:biokey/desktop/server/tls_server.dart';
 import '../support/test_keys.dart';
 
 void main() {
@@ -18,15 +22,15 @@ void main() {
   late FakeLauncher launcher;
   late FakeNotifier notifier;
   late DesktopSession session;
-  late FakeWsServer fakeServer;
+  late FakeLinkServer fakeServer;
   late FakeClock clock;
   final keys = TestKeys();
 
-  DesktopController build(SecureKv kv, {Duration phoneWait = const Duration(seconds: 5), void Function()? onShowWindow}) => DesktopController(
+  DesktopController build(SecureKv kv, {Duration phoneWait = const Duration(seconds: 5), void Function()? onShowWindow, DiscoveryApi? discovery}) => DesktopController(
         store: DesktopStore(kv), apps: AppStore(kv), launcher: launcher, verifier: const EcdsaVerifier(),
         clock: clock, notifier: notifier,
-        serverFactory: (id, s, onEffect) { session = s; return fakeServer = FakeWsServer(onEffect); },
-        mdns: null,
+        serverFactory: (id, s, onEffect) { session = s; return fakeServer = FakeLinkServer(onEffect); },
+        discovery: discovery,
         phoneWait: phoneWait,
         onShowWindow: onShowWindow,
         // Fixed instead of the real primaryLanIPv4(): startPairing() must not
@@ -236,10 +240,37 @@ void main() {
     c.dispose();
     expect(() => fakeServer.onEffect(const PhoneOnline(false)), returnsNormally);
   });
+
+  test('a discovery bind failure notifies but does not abort init(); the rest of the desktop still starts', () async {
+    final broken = FakeDiscovery(startError: Exception('address in use'));
+    final withDiscovery = build(InMemorySecureKv(), discovery: broken);
+    await expectLater(withDiscovery.init(), completes);
+    expect(broken.startCalled, isTrue);
+    expect(notifier.shown.single.$2, contains('Découverte réseau indisponible'));
+    // init() finished past the discovery failure: the rest of startup ran.
+    expect(withDiscovery.pcId, hasLength(16));
+    await withDiscovery.addApp(r'C:\x.exe', label: 'X');
+    expect(withDiscovery.apps, hasLength(1));
+  });
 }
 
-class FakeWsServer implements WsServerApi {
-  FakeWsServer(this.onEffect);
+class FakeDiscovery implements DiscoveryApi {
+  FakeDiscovery({this.startError});
+  final Object? startError;
+  bool startCalled = false;
+  @override
+  Future<void> start({required String pcId, required String name, required int tcpPort, InternetAddress? bind, int port = discoveryPort}) async {
+    startCalled = true;
+    final err = startError;
+    if (err != null) throw err;
+  }
+
+  @override
+  Future<void> stop() async {}
+}
+
+class FakeLinkServer implements LinkServerApi {
+  FakeLinkServer(this.onEffect);
   final void Function(DesktopEffect) onEffect;
   final applied = <DesktopEffect>[];
   @override

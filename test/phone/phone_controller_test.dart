@@ -98,6 +98,27 @@ void main() {
     expect(done, isTrue);
   });
 
+  test('setHost sends the command and resolves once the service acknowledges it', () async {
+    var done = false;
+    final setting = c.setHost('a', 'pc-maison.tailnet.ts.net').then((_) => done = true);
+    await settle();
+    final cmd = toTask.singleWhere((m) => m['op'] == TaskOps.setHost);
+    expect(cmd['pcId'], 'a');
+    expect(cmd['host'], 'pc-maison.tailnet.ts.net');
+    expect(done, isFalse);
+    link.task.send({'op': TaskOps.setHostResult, 'reqId': cmd['reqId'], 'ok': true});
+    await setting;
+    expect(done, isTrue);
+  });
+
+  test('setHost throws the service-side reason on failure', () async {
+    final setting = c.setHost('a', 'not a host');
+    await settle();
+    final cmd = toTask.singleWhere((m) => m['op'] == TaskOps.setHost);
+    link.task.send({'op': TaskOps.setHostResult, 'reqId': cmd['reqId'], 'ok': false, 'error': 'Adresse invalide'});
+    await expectLater(setting, throwsA(isA<StateError>().having((e) => e.message, 'message', 'Adresse invalide')));
+  });
+
   test('answers ping with pong, and signer requests with the real signer', () async {
     link.task.send({'op': TaskOps.ping, 'reqId': 'p1'});
     link.task.send({'op': TaskOps.ensurePublicKey, 'reqId': 'k1'});

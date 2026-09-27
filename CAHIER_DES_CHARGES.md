@@ -97,7 +97,7 @@ MoSCoW : **M** indispensable v1 · **S** souhaitable · **C** plus tard.
 |---|---|---|
 | F-30 | PC : lancement à l'ouverture de session, icône barre système, notifications natives, thème clair/sombre système, fenêtre fermée = réduite dans la barre | M |
 | F-31 | Téléphone : service premier plan léger (Android), notification haute priorité ouvrant directement l'invite biométrique, guide d'exclusion de l'optimisation batterie au premier lancement | M |
-| F-32 | Découverte du PC par **mDNS** (`_biokey._tcp`), reconnexion automatique après veille / changement de Wi-Fi / redémarrage | M |
+| F-32 | Découverte du PC par diffusion UDP (port 47623), reconnexion automatique après veille / changement de Wi-Fi / redémarrage | M |
 | F-33 | Tuile de réglages rapides Android, raccourci d'app | C |
 | F-34 | Repli **Bluetooth LE** quand pas de LAN commun | C |
 
@@ -107,13 +107,14 @@ MoSCoW : **M** indispensable v1 · **S** souhaitable · **C** plus tard.
 |---|---|
 | Latence | Clic PC → invite affichée sur le téléphone < 1 s (LAN) ; scénario complet < 3 s |
 | Fiabilité | Reconnexion sans intervention ; 0 demande fantôme ; 0 rejeu possible |
-| Batterie | Connexion WebSocket persistante idle + ping toutes les 45 s ; pas de polling ; < 1 % / jour au repos |
+| Batterie | Connexion TLS persistante idle ; téléphone → PC : `ping` après 30 s d'inactivité ; PC → téléphone : `ping` toutes les 45 s ; les deux sens ferment la connexion après 60 s sans aucune trame reçue ; pas de polling ; < 1 % / jour au repos |
 | Ressources PC | < 150 Mo RAM au repos (Flutter Windows ≈ 80–120 Mo), < 1 % CPU |
 | Confidentialité | Aucune donnée ne quitte le LAN. Aucun réseau sortant (vérifiable au pare-feu) |
 | Accessibilité | Tailles de texte système, contraste AA, lecteur d'écran sur les 4 écrans |
 | Langues | Français, anglais (fichiers ARB, 2 fichiers) |
 | Compatibilité | Android 10+ (cible 15) · Windows 10 22H2+ (cible 11) · macOS 13+ · Linux (GTK) · iOS 15+ |
 | Installation | Windows : MSIX signé ou exe portable · Android : APK · macOS : `.dmg` · Linux : AppImage · iOS : TestFlight/sideload |
+| Hors de chez soi | Pas de serveur BioKey sur Internet : via le tunnel de l'utilisateur (WireGuard/Tailscale), hôte modifiable par PC |
 
 ## 7. Sécurité
 
@@ -139,7 +140,7 @@ MoSCoW : **M** indispensable v1 · **S** souhaitable · **C** plus tard.
 - **Ce qui est signé** : SHA-256 des **octets exacts** du message `auth` tel qu'envoyé par le PC. Pas de canonicalisation JSON : le téléphone signe ce qu'il a reçu, le PC vérifie sur ce qu'il a envoyé.
 - **Vérification côté PC** : ECDSA P-256 / SHA-256 en Dart pur. Aucune dépendance native.
 
-### 7.3 Protocole (JSON sur WebSocket, `wss://`, version 1)
+### 7.3 Protocole (JSON en trames longueur-préfixées (4 octets big-endian + UTF-8, ≤ 64 Kio) sur TLS 1.3 épinglé, version 1)
 
 **Appairage**
 
@@ -159,22 +160,23 @@ PC        → Téléphone {"type":"welcome"}  ou  {"type":"unknown"}            
 PC        → Téléphone {"type":"auth","id":"<uuid>","pcId":"…","action":"open","label":"Mon app","nonce":"…","iat":1780000000,"exp":1780000030}
 Téléphone → PC        {"type":"auth_ok","id":"…","sig":"…"}
               ou      {"type":"auth_denied","id":"…","reason":"user|timeout|biometric_failed"}
-Les deux              {"type":"ping"} / {"type":"pong"}  toutes les 45 s
+Téléphone → PC        {"type":"ping"}  après 30 s d'inactivité, répond {"type":"pong"}
+PC        → Téléphone {"type":"ping"}  toutes les 45 s, répond {"type":"pong"}
 ```
 
-Règles : tout message inconnu ou malformé ferme la connexion. Toute signature invalide = refus + entrée d'historique. Version incompatible ⇒ message d'erreur clair, pas de dégradation silencieuse.
+Règles : tout message inconnu ou malformé ferme la connexion. Toute signature invalide = refus + entrée d'historique. Version incompatible ⇒ message d'erreur clair, pas de dégradation silencieuse. Liveness : chaque côté ferme la connexion s'il n'a reçu **aucune** trame (`ping` compris) depuis 60 s — ce qui laisse deux marges de raté au `ping` de 45 s du PC comme à celui de 30 s du téléphone avant la coupure.
 
 ## 8. Architecture et technologies
 
 ```
-┌──────────────────────────┐   wss:// TLS 1.3, cert épinglé   ┌──────────────────────────┐
-│  BioKey · rôle Téléphone │ ◄──────── WebSocket LAN ────────► │  BioKey · rôle Ordinateur│
+┌──────────────────────────┐    TLS brut 1.3, cert épinglé   ┌──────────────────────────┐
+│  BioKey · rôle Téléphone │ ◄──────── trames TLS LAN ───────► │  BioKey · rôle Ordinateur│
 │  Android / iOS           │                                    │  Windows / macOS / Linux │
 │                          │   auth(id, nonce, label)           │                          │
-│  • Clé P-256 biométrique │ ◄───────────────────────────────── │  • Serveur wss + mDNS    │
+│  • Clé P-256 biométrique │ ◄───────────────────────────────── │  • Serveur TLS + UDP     │
 │  • Invite biométrique OS │   auth_ok(sig)                     │  • Vérif. ECDSA          │
 │  • Service + notif       │ ─────────────────────────────────► │  • Barre système         │
-│  • Scanner QR + mDNS     │                                    │  • Lanceur d'apps        │
+│  • Scanner QR + UDP      │                                    │  • Lanceur d'apps        │
 └──────────────────────────┘                                    └──────────────────────────┘
         même code Dart : protocole, modèles, stockage, i18n, thème
 ```
@@ -199,10 +201,9 @@ Compromis accepté : côté PC, l'UI n'est pas Fluent mais Material 3 aux couleu
 | Invite biométrique | fournie par le même plugin (BiometricPrompt / LocalAuthentication) | Android, iOS |
 | Scan QR | `mobile_scanner` | Android, iOS |
 | Affichage QR | `qr_flutter` | desktop |
-| mDNS (annonce + découverte) | `bonsoir` | toutes |
-| Transport | `dart:io` `HttpServer` + `SecurityContext` + `WebSocketTransformer` (PC), `WebSocket.connect` (téléphone) — **zéro dépendance** | toutes |
-| Certificat auto-signé | `basic_utils` (X509) ou `pointycastle` | desktop |
-| Vérification ECDSA | `pointycastle` (Dart pur) | desktop |
+| Découverte (annonce + recherche) | UDP broadcast `dart:io` (port 47623) | toutes |
+| Transport | `dart:io` `SecureServerSocket`/`SecureSocket` + trames longueur-préfixées — **zéro dépendance** | toutes |
+| Certificat auto-signé + vérification ECDSA | `pointycastle` (Dart pur) seul | desktop |
 | Stockage sécurisé | `flutter_secure_storage` (DPAPI / Keychain / libsecret / Keystore) | toutes |
 | Service premier plan | `flutter_foreground_task` | Android |
 | Notifications | `flutter_local_notifications` (mobile), `local_notifier` (desktop) | toutes |
@@ -221,7 +222,7 @@ biokey/
   lib/
     core/        protocole (messages, versions), crypto (vérif ECDSA, cert), stockage, i18n, thème
     phone/       rôle Téléphone : appairage, service, invite, écran État
-    desktop/     rôle Ordinateur : serveur wss, mDNS, barre système, apps protégées, fenêtre
+    desktop/     rôle Ordinateur : serveur TLS, répondeur UDP, barre système, apps protégées, fenêtre
     main.dart    choisit le rôle selon la plateforme (mobile ⇒ Téléphone, desktop ⇒ Ordinateur)
   test/          core/ testé sans appareil ; desktop/ avec un faux téléphone en mémoire
 ```
@@ -273,7 +274,7 @@ Règle : `core/` ne dépend d'aucun plugin de plateforme. Tout ce qui touche à 
 |---|---|---|
 | `biometric_signature` ne fait pas l'invalidation à l'enrôlement ou casse sur Nothing OS | Sécurité affaiblie / blocage | Testé au J0. Repli : plugin Kotlin maison, périmètre minuscule |
 | Nothing OS tue le service premier plan | Demandes perdues | Exclusion batterie guidée, notification persistante, test réel ; repli : ping plus court |
-| Changement d'IP / réseau | Reconnexion lente | mDNS + cache de la dernière IP + tentative immédiate au retour Wi-Fi |
+| Changement d'IP / réseau | Reconnexion lente | diffusion UDP + cache de la dernière IP + hôte manuel + tentative immédiate au retour Wi-Fi |
 | Flutter desktop : barre système sous Linux (Wayland) | Icône absente | `tray_manager` (StatusNotifier) ; documenter la limite |
 | Instance unique Windows depuis un `.lnk` | Deux BioKey ouverts | Port local + jeton, testé au J1 |
 | Poids Flutter Windows (~100 Mo RAM) | Ressenti « lourd » | Accepté et documenté ; fenêtre jamais rendue tant que non ouverte |

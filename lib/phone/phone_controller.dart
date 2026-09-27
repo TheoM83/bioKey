@@ -89,6 +89,18 @@ final class PhoneController extends ChangeNotifier {
     await _command(TaskOps.revoke, {'pcId': pcId});
   }
 
+  /// Sets a manual host for [pcId] (for reaching it over the user's own
+  /// WireGuard/Tailscale tunnel — BioKey itself never has a server). The
+  /// service validates and persists it, then restarts that PC's link with
+  /// the new host; throws a [StateError] with the reason (e.g. "Adresse
+  /// invalide") on failure.
+  Future<void> setHost(String pcId, String host) async {
+    final reply = await _command(TaskOps.setHost, {'pcId': pcId, 'host': host});
+    if (reply['ok'] != true) {
+      throw StateError('${reply['error'] ?? 'échec'}');
+    }
+  }
+
   Future<Map<String, Object?>> _command(String op, Map<String, Object?> args) async {
     final reqId = 'u${++_nextId}';
     final c = Completer<Map<String, Object?>>();
@@ -108,7 +120,7 @@ final class PhoneController extends ChangeNotifier {
     switch (m['op']) {
       case TaskOps.state:
         _applyState(m);
-      case TaskOps.pairResult || TaskOps.revoked:
+      case TaskOps.pairResult || TaskOps.revoked || TaskOps.setHostResult:
         final c = _pending.remove(m['reqId']);
         if (c != null && !c.isCompleted) c.complete(m);
       case TaskOps.ping:

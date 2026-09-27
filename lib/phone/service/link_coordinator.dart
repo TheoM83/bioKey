@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show InternetAddress;
 
 import '../../core/pairing/qr_payload.dart';
 import '../../core/session/biometric_signer.dart';
@@ -10,6 +11,24 @@ import 'task_transport.dart';
 
 typedef LinkFactory = PcLinkApi Function(PairedPc pc, PhoneSession session, void Function(PhoneEffect) onEffect);
 typedef Pairer = Future<PairedPc> Function(QrPayload qr, PhoneSession session, void Function(PhoneEffect) onEffect);
+
+/// A conservative check for what [PcLink]'s pinned `SecureSocket.connect`
+/// can actually resolve: an IPv4/IPv6 literal (for a bare tunnel IP), or a
+/// DNS-style hostname — including a MagicDNS name such as
+/// `pc-maison.tailnet.ts.net`. [host] must already be trimmed.
+///
+/// The QR fingerprint stays the pin either way: accepting a hostname here
+/// widens *reachability*, never the security boundary.
+///
+/// `host:port` is rejected on purpose: the port is never user-supplied
+/// here — it stays whatever was already stored for the paired PC (see
+/// [LinkCoordinator._setHost]) — so a manual host is a bare address/name.
+bool isValidHost(String host) {
+  if (host.isEmpty || host.length > 253 || host.contains(' ')) return false;
+  if (InternetAddress.tryParse(host) != null) return true;
+  return RegExp(r'^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$')
+      .hasMatch(host);
+}
 
 /// The network side of the phone role, run inside the foreground-service
 /// isolate so the links to paired PCs survive the Activity being destroyed
@@ -93,6 +112,8 @@ final class LinkCoordinator {
         final pcId = m['pcId'];
         if (pcId is String) await _revoke(pcId);
         _send({'op': TaskOps.revoked, 'reqId': m['reqId']});
+      case TaskOps.setHost:
+        await _setHost(m['reqId'], m['pcId'], m['host']);
       case TaskOps.refresh:
         // The UI's key changed (re-enrolment): reconnect everything so each
         // PC sees a fresh `hello` — and says `unknown` if it must re-pair.
@@ -145,6 +166,31 @@ final class LinkCoordinator {
         // The key is useless without a paired PC anyway; the next pairing
         // recreates it.
       }
+    }
+    publishState();
+  }
+
+  /// Sets (or, given an empty string, clears) a manual host for [pcId]
+  /// (for use over the user's own WireGuard/Tailscale tunnel — BioKey
+  /// itself never has a server): validates it, persists it as
+  /// [PairedPc.manualHost] — never overwriting [PairedPc.host], the last
+  /// known LAN address, which discovery keeps up to date on its own — and
+  /// restarts the link so the next connect attempt sees it. An invalid
+  /// host, or an unknown [pcId], leaves the store and the link untouched.
+  Future<void> _setHost(Object? reqId, Object? pcId, Object? rawHost) async {
+    try {
+      if (pcId is! String) throw const FormatException('PC manquant');
+      final host = (rawHost is String ? rawHost : '').trim();
+      if (host.isNotEmpty && !isValidHost(host)) throw const FormatException('Adresse invalide');
+      final i = _pcs.indexWhere((p) => p.pcId == pcId);
+      if (i < 0) throw StateError('PC inconnu');
+      final updated = _pcs[i].copyWith(manualHost: host.isEmpty ? null : host, clearManualHost: host.isEmpty);
+      await _store.upsertPc(updated);
+      _pcs = await _store.pcs();
+      await _startLink(updated);
+      _send({'op': TaskOps.setHostResult, 'reqId': reqId, 'ok': true});
+    } on Object catch (e) {
+      _send({'op': TaskOps.setHostResult, 'reqId': reqId, 'ok': false, 'error': _describe(e)});
     }
     publishState();
   }

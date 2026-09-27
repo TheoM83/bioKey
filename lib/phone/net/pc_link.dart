@@ -3,12 +3,13 @@ import 'dart:io';
 import 'package:async/async.dart' show StreamQueue;
 import '../../core/pairing/qr_payload.dart';
 import '../../core/protocol/codec.dart';
+import '../../core/protocol/framing.dart';
 import '../../core/protocol/messages.dart';
 import '../../core/session/phone_session.dart';
 import '../../core/storage/phone_store.dart';
 import 'pinned_socket.dart';
 
-typedef Connect = Future<WebSocket> Function(String host, int port, String fp);
+typedef Connect = Future<SecureSocket> Function(String host, int port, String fp);
 typedef Backoff = Duration Function(int attempt);
 
 /// 1, 2, 4, 8, 15, 30 s, then capped at 30 s.
@@ -16,7 +17,7 @@ Duration defaultBackoff(int attempt) => Duration(seconds: const [1, 2, 4, 8, 15,
 
 /// The operations [PhoneController] needs from a PC link, extracted so
 /// tests can inject a fake instead of a real (pinned-TLS) socket — mirrors
-/// [WsServerApi] on the desktop side.
+/// [LinkServerApi] on the desktop side.
 abstract interface class PcLinkApi {
   PairedPc get pc;
   bool get online;
@@ -24,7 +25,9 @@ abstract interface class PcLinkApi {
   Future<void> stop();
 }
 
-/// One reconnecting WebSocket link between the phone and a single paired PC.
+/// One reconnecting pinned-TLS link between the phone and a single paired
+/// PC, carrying length-prefixed JSON frames (`framing.dart`) over a raw
+/// socket.
 ///
 /// Drives the pure [PhoneSession] state machine against a real (pinned-TLS)
 /// socket: connects, sends `hello`, applies every effect the session emits
@@ -32,6 +35,12 @@ abstract interface class PcLinkApi {
 /// else forwarded to [onEffect]), and reconnects with backoff on
 /// disconnect/failure. Emits [PhoneOnlineChanged] itself (the session never
 /// does) so callers can track connectivity without polling [online].
+///
+/// Transport liveness (replaces a transport-level ping/pong): a protocol
+/// `ping` is sent every [pingInterval] the connection has otherwise been
+/// idle, and the connection is closed if no frame at all (in either
+/// direction is received) for [livenessTimeout] — mirrors the equivalent
+/// rule on [TlsServer].
 ///
 /// Lifecycle: every loop iteration is tagged with the generation it was
 /// started under (bumped by [start]); every resume point re-checks
@@ -47,15 +56,27 @@ final class PcLink implements PcLinkApi {
     Connect? connect,
     Future<String?> Function(String pcId)? resolveHost,
     Backoff? backoff,
+    this.pingInterval = const Duration(seconds: 30),
+    this.livenessTimeout = const Duration(seconds: 60),
   })  : _session = session,
         _connect = connect ?? _defaultConnect,
         _resolve = resolveHost,
         _backoff = backoff ?? defaultBackoff;
 
-  static Future<WebSocket> _defaultConnect(String h, int p, String fp) => connectPinned(host: h, port: p, fingerprint: fp);
+  /// How long the connection may sit idle (no frame sent) before a protocol
+  /// `ping` is sent to keep it alive. Injectable so tests can use short
+  /// intervals instead of waiting out the real defaults.
+  final Duration pingInterval;
 
-  /// The paired PC this link talks to. Only updated once mDNS has resolved
-  /// a new host *and* a `welcome` has actually been received on it (see
+  /// How long with no frame received at all (in either direction) before
+  /// the connection is considered dead and closed. Injectable for the same
+  /// reason as [pingInterval].
+  final Duration livenessTimeout;
+
+  static Future<SecureSocket> _defaultConnect(String h, int p, String fp) => connectPinned(host: h, port: p, fingerprint: fp);
+
+  /// The paired PC this link talks to. Only updated once UDP discovery has
+  /// resolved a new host *and* a `welcome` has actually been received on it (see
   /// [_pendingHost]) — never on the mere hope that a resolved host works.
   @override
   PairedPc pc;
@@ -65,7 +86,7 @@ final class PcLink implements PcLinkApi {
   final Future<String?> Function(String)? _resolve;
   final Backoff _backoff;
 
-  WebSocket? _ws;
+  SecureSocket? _ws;
   bool _running = false;
   @override
   bool online = false;
@@ -79,19 +100,57 @@ final class PcLink implements PcLinkApi {
   /// [_delayOrWake]/[_resolveOrWake].
   Completer<void>? _wakeCompleter;
 
-  /// An mDNS-resolved host awaiting confirmation: connect attempts prefer
+  /// A discovery-resolved host awaiting confirmation: connect attempts prefer
   /// it over [pc]'s stored host, but it only overwrites [pc] (and gets
   /// persisted via a [PhonePairedWith] effect) once a `welcome` actually
   /// arrives on it — resolving a host is not proof it's reachable.
   ///
   /// Cleared (not just left stale) whenever `resolveHost` returns `null`
-  /// or the already-stored host, so one bad/transient mDNS answer can't
+  /// or the already-stored host, so one bad/transient discovery answer can't
   /// strand the link on it forever; while it *is* set, connect attempts
   /// alternate between it and [pc]'s stored host (see [_preferPending]) so
   /// a resolved-but-wrong host doesn't crowd out retrying the one that's
-  /// known to have worked before.
+  /// known to have worked before. Purely a LAN concept — it is never
+  /// derived from, and never overwrites, [PairedPc.manualHost]; see
+  /// [_candidateHost] for how the two combine when a manual host is set.
   String? _pendingHost;
   bool _preferPending = true;
+
+  /// Whether there are currently two distinct hosts worth alternating
+  /// between: either a discovery-resolved [_pendingHost], or a user-set
+  /// [PairedPc.manualHost] (which always alternates against [pc.host],
+  /// the last known LAN host — see [_candidateHost]).
+  bool get _hasAlternateCandidate => _pendingHost != null || pc.manualHost != null;
+
+  /// The host to try for this connect attempt.
+  ///
+  /// With no manual host set: [_pendingHost] (a discovery-resolved
+  /// candidate not yet confirmed by a `welcome`) when [_preferPending],
+  /// else the stored [PairedPc.host] — unchanged from before manual hosts
+  /// existed.
+  ///
+  /// With a manual host set: alternates between it and the last known LAN
+  /// host — [_pendingHost] when discovery has resolved a fresher one,
+  /// else [PairedPc.host] itself — reusing the same [_preferPending]
+  /// toggle. Discovery only ever refines the LAN side of this pair; it
+  /// never overwrites [PairedPc.manualHost].
+  String _candidateHost() {
+    final manual = pc.manualHost;
+    if (manual == null) {
+      return (_pendingHost != null && _preferPending) ? _pendingHost! : pc.host;
+    }
+    final lan = _pendingHost ?? pc.host;
+    return _preferPending ? manual : lan;
+  }
+
+  /// Time elapsed since a frame was last sent/received on the current
+  /// socket; drives the idle-ping and liveness-close rules. Backed by a
+  /// monotonic [Stopwatch] (never [DateTime.now]) so a wall-clock jump —
+  /// e.g. an NTP correction or the user changing the system clock — can
+  /// never make a healthy link look idle/dead, or vice versa. Reset (never
+  /// replaced) for each new connection.
+  final Stopwatch _sentSw = Stopwatch();
+  final Stopwatch _recvSw = Stopwatch();
 
   @override
   Future<void> start() async {
@@ -107,7 +166,7 @@ final class PcLink implements PcLinkApi {
   Future<void> stop() async {
     _running = false;
     _wakeCompleter?.complete();
-    await _ws?.close();
+    _ws?.destroy();
     final future = _loopFuture;
     if (future != null) {
       await future.timeout(const Duration(seconds: 6), onTimeout: () {});
@@ -158,36 +217,63 @@ final class PcLink implements PcLinkApi {
 
   Future<void> _loop(int gen) async {
     while (!_stale(gen)) {
-      WebSocket? ws;
+      SecureSocket? ws;
+      Timer? liveness;
       try {
-        final host = (_pendingHost != null && _preferPending) ? _pendingHost! : pc.host;
+        final host = _candidateHost();
         ws = await _connect(host, pc.port, pc.fingerprint);
         if (_stale(gen)) return; // stop() raced the connect: close in finally, don't touch _ws.
         _ws = ws;
         _apply(await _session.hello(pc), ws, gen);
         if (_stale(gen)) return;
+        final socket = ws;
+        _sentSw..reset()..start();
+        _recvSw..reset()..start();
+        // A silent Wi-Fi drop leaves a TCP socket that never sees a
+        // FIN/RST; this liveness timer forces the connection to close
+        // (ending the `await for` below) within a bounded time instead of
+        // hanging forever, and keeps a genuinely idle link alive with a
+        // protocol ping so the PC's own liveness rule doesn't close it.
+        liveness = Timer.periodic(const Duration(seconds: 1), (_) {
+          if (_stale(gen)) return;
+          if (_recvSw.elapsed >= livenessTimeout) {
+            socket.destroy();
+            return;
+          }
+          if (_sentSw.elapsed >= pingInterval) {
+            try {
+              socket.add(encodeFrame(Codec.encode(const PingMsg())));
+              _sentSw.reset();
+            } on Object {
+              // Socket already closed underneath us: the read loop will
+              // notice and reconnect.
+            }
+          }
+        });
         // The socket is read continuously — never paused while a frame is
-        // being handled — so WebSocket-level pings keep being answered
+        // being handled — so the liveness ping keeps being sent/answered
         // during a (possibly long) biometric prompt; frames themselves are
         // still handled strictly in order through [chain].
         var chain = Future<void>.value();
-        final socket = ws;
-        await for (final data in socket) {
+        await for (final data in FrameDecoder().bind(socket)) {
           if (_stale(gen)) break;
-          if (data is! String) break;
+          _recvSw.reset();
           chain = chain.then((_) => _handle(data, socket, host, gen));
         }
         // That connect attempt is now settled (success or failure): the
         // *next* one alternates to the other candidate host, so a
         // pendingHost that keeps failing doesn't crowd out retrying the
         // stored one, and vice versa.
-        if (_pendingHost != null) _preferPending = !_preferPending;
+        if (_hasAlternateCandidate) _preferPending = !_preferPending;
       } on Object {
-        if (_pendingHost != null) _preferPending = !_preferPending;
+        if (_hasAlternateCandidate) _preferPending = !_preferPending;
       } finally {
+        liveness?.cancel();
+        _sentSw.stop();
+        _recvSw.stop();
         final leaked = ws;
         if (leaked != null) {
-          unawaited(leaked.close());
+          leaked.destroy();
         }
         if (identical(_ws, ws)) _ws = null;
       }
@@ -197,12 +283,17 @@ final class PcLink implements PcLinkApi {
         final h = await _resolveOrWake(pc.pcId);
         if (_stale(gen)) return; // e.g. revoked/stopped while we were resolving.
         final newPendingHost = (h != null && h != pc.host) ? h : null;
-        // Only reset the alternation to "try it first" for a genuinely
-        // new candidate; re-resolving the *same* host we're already
-        // alternating against must not keep clobbering the toggle back to
-        // "prefer pending", or the alternation above never gets a chance
-        // to actually try the stored host again.
-        if (newPendingHost != _pendingHost) _preferPending = true;
+        // Only reset the alternation for a genuinely new candidate;
+        // re-resolving the *same* host we're already alternating against
+        // must not keep clobbering the toggle, or the alternation above
+        // never gets a chance to actually try the other side again. With
+        // no manual host, "prefer pending" means prefer this fresh
+        // discovery result next; with a manual host set, that result is
+        // instead the *other* (LAN) candidate manualHost alternates
+        // against, and manualHost has already had its turn this cycle, so
+        // prefer the fresh LAN candidate next instead of trying manualHost
+        // again immediately.
+        if (newPendingHost != _pendingHost) _preferPending = pc.manualHost == null;
         _pendingHost = newPendingHost;
       }
       if (_stale(gen)) return;
@@ -212,7 +303,7 @@ final class PcLink implements PcLinkApi {
     }
   }
 
-  Future<void> _handle(String data, WebSocket ws, String host, int gen) async {
+  Future<void> _handle(String data, SecureSocket ws, String host, int gen) async {
     if (_stale(gen)) return;
     try {
       final fx = await _session.onFrame(pc, data);
@@ -239,7 +330,10 @@ final class PcLink implements PcLinkApi {
       onEffect(PhoneOnlineChanged(pc.pcId, true));
     }
     if (_pendingHost != null && _pendingHost == connectedHost && _pendingHost != pc.host) {
-      pc = PairedPc(pcId: pc.pcId, name: pc.name, host: _pendingHost!, port: pc.port, fingerprint: pc.fingerprint, session: pc.session);
+      // Only the LAN host moves; a manual host (if set) is untouched —
+      // copyWith without `manualHost` keeps whatever pc.manualHost already
+      // is.
+      pc = pc.copyWith(host: _pendingHost!);
       onEffect(PhonePairedWith(pc));
     }
     _pendingHost = null;
@@ -261,18 +355,19 @@ final class PcLink implements PcLinkApi {
   /// to a newer generation by the time a stale one's `onFrame` — e.g. a
   /// slow biometric sign — finally resolves) and drops every effect
   /// outright once stale, instead of forwarding them to [onEffect].
-  void _apply(List<PhoneEffect> fx, WebSocket ws, int gen) {
+  void _apply(List<PhoneEffect> fx, SecureSocket ws, int gen) {
     if (_stale(gen)) return;
     for (final e in fx) {
       switch (e) {
         case PhoneSend():
           try {
-            ws.add(e.frame);
+            ws.add(encodeFrame(e.frame));
+            _sentSw.reset();
           } on Object {
             // Socket already closed underneath us: the reconnect loop owns it.
           }
         case PhoneClose():
-          unawaited(ws.close());
+          ws.destroy();
         default:
           onEffect(e);
       }
@@ -292,7 +387,7 @@ final class PcLink implements PcLinkApi {
   ///
   /// If the QR's host can't be reached (the PC advertised the wrong
   /// interface, e.g. a virtual switch), the PC is looked up by id via
-  /// [resolveHost] (mDNS) and the connection retried once there — still
+  /// [resolveHost] (UDP discovery) and the connection retried once there — still
   /// pinned to the QR's certificate fingerprint. The returned [PairedPc]
   /// records the host that actually worked.
   static Future<PairedPc> pair({
@@ -302,7 +397,7 @@ final class PcLink implements PcLinkApi {
     Connect? connect,
     Future<String?> Function(String pcId)? resolveHost,
   }) async {
-    WebSocket? ws;
+    SecureSocket? ws;
     var cancelled = false;
     final attempt = _pair(
       qr: qr,
@@ -329,7 +424,7 @@ final class PcLink implements PcLinkApi {
       // on its side after the phone already reported failure to its
       // caller.
       cancelled = true;
-      unawaited(ws?.close());
+      ws?.destroy();
       // The abandoned attempt still runs to completion internally (Dart's
       // Future.timeout doesn't cancel it); observe its eventual result so
       // it doesn't surface as an unhandled zone error once `cancelled`
@@ -342,14 +437,14 @@ final class PcLink implements PcLinkApi {
     required QrPayload qr,
     required PhoneSession session,
     required void Function(PhoneEffect) onEffect,
-    required void Function(WebSocket) bindSocket,
+    required void Function(SecureSocket) bindSocket,
     required bool Function() isCancelled,
     Connect? connect,
     Future<String?> Function(String pcId)? resolveHost,
   }) async {
     final doConnect = connect ?? _defaultConnect;
     var host = qr.host;
-    WebSocket ws;
+    SecureSocket ws;
     try {
       ws = await doConnect(host, qr.port, qr.fingerprint);
     } on Object {
@@ -360,16 +455,19 @@ final class PcLink implements PcLinkApi {
     }
     bindSocket(ws);
     if (isCancelled()) {
-      await ws.close();
+      // The overall pair() call already gave up (60s timeout): destroy
+      // outright rather than a graceful close(), which would wait on a
+      // TLS close handshake with a peer nobody is listening for anymore.
+      ws.destroy();
       throw StateError('appairage: délai dépassé pendant la connexion');
     }
     // Buffer through a controller so the socket itself is never paused
     // while we wait on the fingerprint prompt (a StreamQueue pauses its
-    // source between requests), which would stop WebSocket pings from
-    // being answered and let the PC drop us mid-pairing.
-    final inbox = StreamController<Object?>();
-    final sub = ws.listen(inbox.add, onError: inbox.addError, onDone: () => unawaited(inbox.close()));
-    final queue = StreamQueue<Object?>(inbox.stream);
+    // source between requests), which would stop it from noticing a close
+    // and let the PC drop us mid-pairing.
+    final inbox = StreamController<String>();
+    final sub = FrameDecoder().bind(ws).listen(inbox.add, onError: inbox.addError, onDone: () => unawaited(inbox.close()));
+    final queue = StreamQueue<String>(inbox.stream);
     var closed = false;
     Future<void> closeWs() async {
       if (closed) return;
@@ -384,7 +482,7 @@ final class PcLink implements PcLinkApi {
       final tmp = PairedPc(pcId: qr.pcId, name: qr.name, host: host, port: qr.port, fingerprint: qr.fingerprint, session: '');
 
       for (final e in await session.beginPairing(qr)) {
-        if (e is PhoneSend) ws.add(e.frame);
+        if (e is PhoneSend) ws.add(encodeFrame(e.frame));
       }
 
       PairedPc? paired;
@@ -393,11 +491,10 @@ final class PcLink implements PcLinkApi {
           throw StateError('connexion fermée pendant l’appairage');
         }
         final data = await queue.next;
-        if (data is! String) continue;
         for (final e in await session.onFrame(tmp, data)) {
           switch (e) {
             case PhoneSend():
-              ws.add(e.frame);
+              ws.add(encodeFrame(e.frame));
             case PhoneClose():
               await closeWs();
               throw StateError('appairage refusé');

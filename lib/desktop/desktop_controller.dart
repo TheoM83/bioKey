@@ -13,11 +13,11 @@ import 'apps/cli.dart';
 import 'apps/launcher.dart';
 import 'apps/protected_app.dart';
 import 'notify.dart';
+import 'server/discovery_responder.dart';
 import 'server/lan.dart';
-import 'server/mdns_advertiser.dart';
-import 'server/ws_server.dart';
+import 'server/tls_server.dart';
 
-/// Wires the pure [DesktopSession] state machine to the [WsServerApi],
+/// Wires the pure [DesktopSession] state machine to the [LinkServerApi],
 /// [AppStore], [AppLauncher] and [Notifier], and exposes the desktop role's
 /// state (paired phone, protected apps, pairing QR) to the tray/window UI
 /// as a [ChangeNotifier].
@@ -29,8 +29,8 @@ final class DesktopController extends ChangeNotifier {
     required Verifier verifier,
     required Clock clock,
     required Notifier notifier,
-    WsServerApi Function(DesktopIdentity identity, DesktopSession session, void Function(DesktopEffect) onEffect)? serverFactory,
-    MdnsAdvertiser? mdns,
+    LinkServerApi Function(DesktopIdentity identity, DesktopSession session, void Function(DesktopEffect) onEffect)? serverFactory,
+    DiscoveryApi? discovery,
     void Function()? onShowWindow,
     void Function()? onDispose,
     Duration phoneWait = const Duration(seconds: 5),
@@ -43,7 +43,7 @@ final class DesktopController extends ChangeNotifier {
         _clock = clock,
         _notifier = notifier,
         _serverFactory = serverFactory,
-        _mdns = mdns,
+        _discovery = discovery,
         _onShowWindow = onShowWindow,
         _onDispose = onDispose,
         _lanAddress = lanAddress,
@@ -55,8 +55,8 @@ final class DesktopController extends ChangeNotifier {
   final Verifier _verifier;
   final Clock _clock;
   final Notifier _notifier;
-  final WsServerApi Function(DesktopIdentity, DesktopSession, void Function(DesktopEffect))? _serverFactory;
-  final MdnsAdvertiser? _mdns;
+  final LinkServerApi Function(DesktopIdentity, DesktopSession, void Function(DesktopEffect))? _serverFactory;
+  final DiscoveryApi? _discovery;
   final void Function()? _onShowWindow;
   final void Function()? _onDispose;
 
@@ -73,7 +73,7 @@ final class DesktopController extends ChangeNotifier {
 
   late DesktopIdentity _identity;
   late DesktopSession _session;
-  late WsServerApi _server;
+  late LinkServerApi _server;
 
   List<ProtectedApp> _appsCache = <ProtectedApp>[];
   PairedPhone? _phone;
@@ -117,11 +117,20 @@ final class DesktopController extends ChangeNotifier {
     _online = false;
     _session = DesktopSession(pcId: _identity.pcId, pcName: pcName, verifier: _verifier, clock: _clock, phone: _phone);
 
-    final factory = _serverFactory ?? (DesktopIdentity id, DesktopSession s, void Function(DesktopEffect) onEffect) => WsServer(identity: id, session: s, onEffect: onEffect);
+    final factory = _serverFactory ?? (DesktopIdentity id, DesktopSession s, void Function(DesktopEffect) onEffect) => TlsServer(identity: id, session: s, onEffect: onEffect);
     _server = factory(_identity, _session, _onEffect);
     _serverCreated = true;
     await _server.start(port: await _store.port());
-    await _mdns?.start(pcId: _identity.pcId, name: pcName, port: _server.port);
+    try {
+      await _discovery?.start(pcId: _identity.pcId, name: pcName, tcpPort: _server.port);
+    } on Object {
+      // Discovery is a convenience (auto-find on the LAN), not a
+      // requirement: pairing by QR code (which carries the host directly)
+      // and typing a manual address both still work without it. A bind
+      // failure here (e.g. port 47623 already held by another process)
+      // must not abort the rest of startup.
+      unawaited(_notifier.show('BioKey', 'Découverte réseau indisponible (port 47623 occupé) — l\'appairage par QR et l\'adresse manuelle fonctionnent'));
+    }
 
     _appsCache = await _apps.all();
     _initialized = true;
@@ -337,7 +346,7 @@ final class DesktopController extends ChangeNotifier {
       if (!w.isCompleted) w.complete(false);
     }
     if (_serverCreated) unawaited(_server.stop());
-    unawaited(_mdns?.stop());
+    unawaited(_discovery?.stop());
     _onDispose?.call();
     super.dispose();
   }

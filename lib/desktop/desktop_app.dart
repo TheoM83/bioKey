@@ -15,7 +15,7 @@ import 'apps/launcher.dart';
 import 'apps/single_instance.dart';
 import 'desktop_controller.dart';
 import 'notify.dart';
-import 'server/mdns_advertiser.dart';
+import 'server/discovery_responder.dart';
 import 'ui/main_window.dart';
 import 'ui/tray.dart';
 
@@ -50,7 +50,7 @@ Future<void> runDesktop(List<String> args) async {
     verifier: const EcdsaVerifier(),
     clock: const SystemClock(),
     notifier: notifier,
-    mdns: MdnsAdvertiser(),
+    discovery: DiscoveryResponder(),
     onShowWindow: () {
       unawaited(windowManager.show());
       unawaited(windowManager.focus());

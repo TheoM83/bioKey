@@ -147,6 +147,7 @@ class _PhoneHomeState extends State<_PhoneHome> {
         needsRepair: widget.controller.needsRepair,
         onScan: () => unawaited(_scan(context)),
         onRevoke: (pcId) => unawaited(_revoke(context, pcId)),
+        onSetHost: (pcId, host) => unawaited(_setHost(context, pcId, host)),
       ),
     );
   }
@@ -158,6 +159,17 @@ class _PhoneHomeState extends State<_PhoneHome> {
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Révocation échouée : ${e is StateError ? e.message : e}')),
+      );
+    }
+  }
+
+  Future<void> _setHost(BuildContext context, String pcId, String host) async {
+    try {
+      await widget.controller.setHost(pcId, host);
+    } on Object catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Modification de l'adresse échouée : ${e is StateError ? e.message : e}")),
       );
     }
   }

@@ -1,9 +1,10 @@
+import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:biokey/core/crypto/identity.dart';
 import 'package:biokey/core/crypto/verify.dart';
 import 'package:biokey/core/session/clock.dart';
 import 'package:biokey/core/session/desktop_session.dart';
-import 'package:biokey/desktop/server/ws_server.dart';
+import 'package:biokey/desktop/server/tls_server.dart';
 import 'package:biokey/phone/net/pinned_socket.dart';
 
 /// `connectPinned` is what actually decides whether a certificate is
@@ -14,21 +15,21 @@ import 'package:biokey/phone/net/pinned_socket.dart';
 /// certificate) would show up here even though every cert involved is
 /// otherwise perfectly valid.
 ///
-/// Note: `connectPinned` builds its `HttpClient` with
-/// `SecurityContext(withTrustedRoots: false)` (see pinned_socket.dart) —
-/// without that, a plain `HttpClient()` consults the platform's system
-/// trust store *before* `badCertificateCallback` ever runs, so a
-/// CA-chained certificate would be accepted regardless of fingerprint. Both
-/// identities here are self-signed (like the real desktop's), so this test
-/// wouldn't catch that specific regression by itself; it is covered by
-/// reading the code (see the report) rather than by a runnable assertion,
-/// since simulating a CA-trusted chain in a unit test isn't practical.
+/// Note: `connectPinned` connects with `SecurityContext(withTrustedRoots:
+/// false)` (see pinned_socket.dart) — without that, a default
+/// `SecureSocket.connect` consults the platform's system trust store
+/// *before* `onBadCertificate` ever runs, so a CA-chained certificate would
+/// be accepted regardless of fingerprint. Both identities here are
+/// self-signed (like the real desktop's), so this test wouldn't catch that
+/// specific regression by itself; it is covered by reading the code (see
+/// the report) rather than by a runnable assertion, since simulating a
+/// CA-trusted chain in a unit test isn't practical.
 void main() {
   test('a real desktop cert pinned to a different identity\'s fingerprint is rejected', () async {
     final servedIdentity = generateDesktopIdentity(pcName: 'served');
     final otherIdentity = generateDesktopIdentity(pcName: 'other');
     final session = DesktopSession(pcId: servedIdentity.pcId, pcName: 'served', verifier: const EcdsaVerifier(), clock: const SystemClock());
-    final server = WsServer(identity: servedIdentity, session: session, onEffect: (_) {});
+    final server = TlsServer(identity: servedIdentity, session: session, onEffect: (_) {});
     await server.start(address: '127.0.0.1', port: 0);
     addTearDown(server.stop);
 
@@ -38,14 +39,37 @@ void main() {
     );
   });
 
-  test('the matching fingerprint connects', () async {
+  test('a fingerprint mismatch is still rejected even if onBadCertificate waves it through', () async {
+    // Simulates onBadCertificate being asked about a *different* cert than
+    // the one actually presented (e.g. a peer sending [attacker leaf,
+    // genuine cert]) by forcing it to always accept: the post-connect
+    // check against socket.peerCertificate — the real leaf — must be what
+    // actually rejects this, not onBadCertificate.
     final identity = generateDesktopIdentity(pcName: 'PC');
     final session = DesktopSession(pcId: identity.pcId, pcName: 'PC', verifier: const EcdsaVerifier(), clock: const SystemClock());
-    final server = WsServer(identity: identity, session: session, onEffect: (_) {});
+    final server = TlsServer(identity: identity, session: session, onEffect: (_) {});
     await server.start(address: '127.0.0.1', port: 0);
     addTearDown(server.stop);
 
-    final ws = await connectPinned(host: '127.0.0.1', port: server.port, fingerprint: identity.fingerprintB64Url).timeout(const Duration(seconds: 5));
-    await ws.close();
+    await expectLater(
+      connectPinned(
+        host: '127.0.0.1',
+        port: server.port,
+        fingerprint: 'does-not-match-anything',
+        onBadCertificateOverride: (_) => true,
+      ).timeout(const Duration(seconds: 5)),
+      throwsA(isA<HandshakeException>()),
+    );
+  });
+
+  test('the matching fingerprint connects', () async {
+    final identity = generateDesktopIdentity(pcName: 'PC');
+    final session = DesktopSession(pcId: identity.pcId, pcName: 'PC', verifier: const EcdsaVerifier(), clock: const SystemClock());
+    final server = TlsServer(identity: identity, session: session, onEffect: (_) {});
+    await server.start(address: '127.0.0.1', port: 0);
+    addTearDown(server.stop);
+
+    final socket = await connectPinned(host: '127.0.0.1', port: server.port, fingerprint: identity.fingerprintB64Url).timeout(const Duration(seconds: 5));
+    await socket.close();
   });
 }

@@ -222,6 +222,89 @@ void main() {
     expect(await store.pcs(), isEmpty);
   });
 
+  test('setHost sets manualHost, restarts the link, and preserves host/session/fingerprint/port', () async {
+    await store.upsertPc(makePc('a'));
+    await startBackend();
+    final old = latest('a');
+
+    link.ui.send({'op': TaskOps.setHost, 'reqId': 'u1', 'pcId': 'a', 'host': 'pc-maison.tailnet.ts.net'});
+    await settle();
+
+    final res = ui.singleWhere((m) => m['op'] == TaskOps.setHostResult);
+    expect(res['reqId'], 'u1');
+    expect(res['ok'], isTrue);
+    expect(old.stopCalls, 1, reason: 'the old link is stopped before the new one starts');
+    expect(latest('a').pc.manualHost, 'pc-maison.tailnet.ts.net');
+    expect(latest('a').pc.host, '127.0.0.1', reason: 'setHost must never overwrite the LAN host — only discovery does that');
+    expect(latest('a').started, isTrue);
+    expect(created.where((l) => l.pc.pcId == 'a' && l.started), hasLength(1), reason: 'never two live links for the same PC');
+
+    final saved = (await store.pcs()).single;
+    expect(saved.manualHost, 'pc-maison.tailnet.ts.net');
+    expect(saved.host, '127.0.0.1', reason: 'the LAN host is kept, not replaced by the manual one');
+    expect(saved.session, 'sess', reason: 'the session secret is preserved across a manual host change');
+    expect(saved.fingerprint, 'fp');
+    expect(saved.port, 1);
+  });
+
+  test('setHost with an empty host clears manualHost and keeps the LAN host', () async {
+    await store.upsertPc(makePc('a').copyWith(manualHost: 'pc-maison.tailnet.ts.net'));
+    await startBackend();
+
+    link.ui.send({'op': TaskOps.setHost, 'reqId': 'u1', 'pcId': 'a', 'host': ''});
+    await settle();
+
+    final res = ui.singleWhere((m) => m['op'] == TaskOps.setHostResult);
+    expect(res['ok'], isTrue);
+    final saved = (await store.pcs()).single;
+    expect(saved.manualHost, isNull);
+    expect(saved.host, '127.0.0.1');
+  });
+
+  test('setHost with an invalid host is rejected without touching the store or the link', () async {
+    await store.upsertPc(makePc('a'));
+    await startBackend();
+    final before = latest('a');
+
+    link.ui.send({'op': TaskOps.setHost, 'reqId': 'u1', 'pcId': 'a', 'host': 'not a host'});
+    await settle();
+
+    final res = ui.singleWhere((m) => m['op'] == TaskOps.setHostResult);
+    expect(res['reqId'], 'u1');
+    expect(res['ok'], isFalse);
+    expect(res['error'], 'Adresse invalide');
+    expect(before.stopCalls, 0, reason: 'an invalid host must not restart the link');
+    expect((await store.pcs()).single.host, '127.0.0.1');
+  });
+
+  test('setHost for an unknown pcId is rejected without touching the store or any link', () async {
+    await store.upsertPc(makePc('a'));
+    await startBackend();
+    final before = latest('a');
+
+    link.ui.send({'op': TaskOps.setHost, 'reqId': 'u1', 'pcId': 'does-not-exist', 'host': '10.0.0.5'});
+    await settle();
+
+    final res = ui.singleWhere((m) => m['op'] == TaskOps.setHostResult);
+    expect(res['reqId'], 'u1');
+    expect(res['ok'], isFalse);
+    expect(res['error'], 'PC inconnu');
+    expect(before.stopCalls, 0, reason: 'an unknown pcId must not restart any existing link');
+    expect(created.where((l) => l.pc.pcId == 'does-not-exist'), isEmpty, reason: 'no link is ever created for a PC that was never paired');
+    expect((await store.pcs()).map((p) => p.pcId), ['a']);
+    expect((await store.pcs()).single.host, '127.0.0.1');
+  });
+
+  test('isValidHost accepts IPv4, IPv6 and hostnames (incl. MagicDNS names); rejects empty/spaced/overlong strings', () {
+    expect(isValidHost('127.0.0.1'), isTrue);
+    expect(isValidHost('fd7a:115c::1'), isTrue);
+    expect(isValidHost('localhost'), isTrue);
+    expect(isValidHost('pc-maison.tailnet.ts.net'), isTrue);
+    expect(isValidHost(''), isFalse);
+    expect(isValidHost('has space'), isFalse);
+    expect(isValidHost('a' * 254), isFalse);
+  });
+
   test('refresh restarts every link and clears needsRepair', () async {
     await store.upsertPc(makePc('a'));
     await startBackend();

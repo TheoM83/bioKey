@@ -7,7 +7,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import '../../core/session/clock.dart';
 import '../../core/storage/phone_store.dart';
 import '../../platform/flutter_secure_kv.dart';
-import '../net/mdns_finder.dart';
+import '../net/discovery_finder.dart';
 import '../net/pc_link.dart';
 import 'link_coordinator.dart';
 import 'proxy_signer.dart';
@@ -48,16 +48,29 @@ final class BiokeyTaskHandler extends TaskHandler {
       notifier: AuthNotifier(),
       cachedPublicKey: store.pubKey,
     );
-    final mdns = MdnsFinder();
+    final discovery = DiscoveryFinder();
     final coordinator = LinkCoordinator(
       store: store,
       signer: signer,
       clock: const SystemClock(),
       send: _transport.send,
-      linkFactory: (pc, session, onEffect) =>
-          PcLink(pc: pc, session: session, onEffect: onEffect, resolveHost: mdns.resolveHost),
-      pairer: (qr, session, onEffect) =>
-          PcLink.pair(qr: qr, session: session, onEffect: onEffect, resolveHost: mdns.resolveHost),
+      // tcpPort is pinned per PC (the paired port for a link, the QR's
+      // port while pairing) so a discovery reply from some other BioKey
+      // desktop — or another service entirely — answering on a different
+      // port for the same pcId is ignored rather than adopted as this PC's
+      // host.
+      linkFactory: (pc, session, onEffect) => PcLink(
+        pc: pc,
+        session: session,
+        onEffect: onEffect,
+        resolveHost: (pcId) => discovery.resolveHost(pcId, tcpPort: pc.port),
+      ),
+      pairer: (qr, session, onEffect) => PcLink.pair(
+        qr: qr,
+        session: session,
+        onEffect: onEffect,
+        resolveHost: (pcId) => discovery.resolveHost(pcId, tcpPort: qr.port),
+      ),
     );
     final backend = TaskBackend(transport: _transport, coordinator: coordinator, replies: signer.handleMessage);
     _signer = signer;
